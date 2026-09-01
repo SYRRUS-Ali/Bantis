@@ -1,0 +1,5 @@
+[lint]
+# B008 flags `Depends(...)` in function argument defaults as a bug, but this
+# is FastAPI's standard, documented dependency-injection pattern (see
+# https://fastapi.tiangolo.com/tutorial/dependencies/) — not an actual issue.
+ignore = ["B008"]
