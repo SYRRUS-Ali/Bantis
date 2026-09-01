@@ -352,7 +352,8 @@ jobs:
       - name: Determine pipeline status
         id: status
         run: |
-          if echo '${{ toJSON(needs) }}' | grep -q '"result":"failure"'; then
+          RESULTS="${{ needs.build.result }} ${{ needs.test.result }} ${{ needs.sast.result }} ${{ needs.secrets-scan.result }} ${{ needs.dependency-scan.result }} ${{ needs.push.result }} ${{ needs.deploy-staging.result }} ${{ needs.promote-latest.result }}"
+          if echo "$RESULTS" | grep -q "failure"; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
             echo "emoji=❌" >> "$GITHUB_OUTPUT"
           else
