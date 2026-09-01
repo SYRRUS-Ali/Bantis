@@ -40,3 +40,7 @@ def root() -> dict[str, str]:
 def health_check() -> dict[str, str]:
     """Liveness check used by Docker Compose / orchestration healthchecks."""
     return {"status": "ok"}
+
+@app.get("/version")
+async def version():
+    return {"version": "0.1.0"}
