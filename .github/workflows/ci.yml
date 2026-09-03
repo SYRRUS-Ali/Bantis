@@ -88,6 +88,7 @@ jobs:
           REDIS_PASSWORD=ci_redis_${{ github.run_id }}
           REDIS_URL=redis://:ci_redis_${{ github.run_id }}@redis:6379/0
           CACHE_TTL_SECONDS=60
+          COMPOSE_PROFILES=range
           EOF
 
       - name: Start the range stack
@@ -296,6 +297,7 @@ jobs:
           REDIS_PASSWORD=staging_redis_${{ github.run_id }}
           REDIS_URL=redis://:staging_redis_${{ github.run_id }}@redis:6379/0
           CACHE_TTL_SECONDS=60
+          COMPOSE_PROFILES=range
           EOF
 
       - name: Start the range stack using the published image
