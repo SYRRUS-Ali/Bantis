@@ -108,6 +108,9 @@ jobs:
           docker compose logs
           exit 1
 
+      - name: Run smoke test
+        run: ./scripts/smoke-test.sh
+
       - name: Install test dependencies
         run: pip install -r tests/requirements.txt
 
@@ -317,13 +320,8 @@ jobs:
           docker compose logs
           exit 1
 
-      - name: Smoke test - health endpoint
-        run: |
-          curl --silent --fail http://localhost:8080/health | grep -q '"status":"ok"'
-
-      - name: Smoke test - version endpoint
-        run: |
-          curl --silent --fail http://localhost:8080/version | grep -q '"version"'
+      - name: Run smoke test
+        run: ./scripts/smoke-test.sh
 
       - name: Show container logs
         if: always()
