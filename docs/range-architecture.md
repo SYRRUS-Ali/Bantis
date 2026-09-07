@@ -38,9 +38,9 @@ are only reachable on the internal Compose network.
 scoped to `range/**` changes only. Jobs, in order:
 
 1. **Build** — builds the `api` Docker image (no push).
-2. **Test & Lint** — Ruff + pytest, run against a full `docker compose`
-   stack (not a bare container — see
-   [lessons from Sprint 1](../README.md)).
+2. **Test & Lint** — Ruff + a [smoke test](../range/README.md#smoke-test)
+   + pytest, run against a full `docker compose` stack (not a bare
+   container — see [lessons from Sprint 1](../README.md)).
 3. **SAST (Semgrep)** — static analysis of `range/` source.
 4. **Secret Scanning (Gitleaks)** — scans full git history.
 5. **Dependency Scan (pip-audit)** — audits `api/requirements.txt` and
