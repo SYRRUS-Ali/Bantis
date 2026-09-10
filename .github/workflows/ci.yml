@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'range/**'
+      - 'attack-sim/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'range/**'
+      - 'attack-sim/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
@@ -217,6 +219,29 @@ jobs:
       - name: Audit test dependencies
         run: pip-audit -r tests/requirements.txt
 
+  attack-sim-test:
+    name: Attack-Sim Interface Tests
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: attack-sim
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m pytest tests -v
+
   push:
     name: Push to GHCR
     runs-on: ubuntu-latest
@@ -409,14 +434,14 @@ jobs:
   notify:
     name: Notify Telegram
     runs-on: ubuntu-latest
-    needs: [build, test, sast, secrets-scan, dependency-scan, push, deploy-staging, promote-latest]
+    needs: [build, test, sast, secrets-scan, dependency-scan, attack-sim-test, push, deploy-staging, promote-latest]
     if: always() && github.event_name != 'workflow_dispatch'
     timeout-minutes: 5
     steps:
       - name: Determine pipeline status
         id: status
         run: |
-          RESULTS="${{ needs.build.result }} ${{ needs.test.result }} ${{ needs.sast.result }} ${{ needs.secrets-scan.result }} ${{ needs.dependency-scan.result }} ${{ needs.push.result }} ${{ needs.deploy-staging.result }} ${{ needs.promote-latest.result }}"
+          RESULTS="${{ needs.build.result }} ${{ needs.test.result }} ${{ needs.sast.result }} ${{ needs.secrets-scan.result }} ${{ needs.dependency-scan.result }} ${{ needs.attack-sim-test.result }} ${{ needs.push.result }} ${{ needs.deploy-staging.result }} ${{ needs.promote-latest.result }}"
           if echo "$RESULTS" | grep -q "failure"; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
             echo "emoji=❌" >> "$GITHUB_OUTPUT"
