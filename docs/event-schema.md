@@ -20,7 +20,7 @@ log line) follows this envelope.
 
 ## Event types (v1)
 
-Only one event type is emitted today. More are added as later milestones
+Two event types are emitted today. More are added as later milestones
 (Attack Simulation, Detection Engine) need them — this list is expected to
 grow, not to be redesigned.
 
@@ -37,6 +37,22 @@ Emitted once per HTTP request, by both `api` and `nginx`.
 | `user_agent`        | string | Only present on `nginx`-sourced events.                     |
 | `duration_ms`       | float  | Only present on `api`-sourced events.                        |
 | `duration_seconds`  | float  | Only present on `nginx`-sourced events (nginx's native unit).|
+
+### `attack_scenario_run`
+Emitted once per scenario execution by `attack-sim`
+(`scenarios/base.py`'s `Scenario.log_result()`), regardless of which
+scenario ran or whether it succeeded.
+
+`details`:
+| Field             | Type   | Notes                                                          |
+|-------------------|--------|------------------------------------------------------------------|
+| `scenario`        | string | The scenario's `name` (e.g. `noop`).                             |
+| `mitre_technique` | string | The scenario's primary MITRE technique ID, or `"N/A"` for non-attack scenarios like `noop`. |
+| `status`          | string | `success`, `failure`, or `error` — see `ScenarioStatus`.          |
+
+Individual scenarios may add further fields to `details` beyond these
+three (via `ScenarioResult.details`) — this table lists only what every
+scenario is guaranteed to include.
 
 ## Known limitation
 `api` and `nginx` report request duration in different units
