@@ -5,6 +5,7 @@ See docs/scenarios/malicious-dependency.md for the full writeup.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
@@ -17,6 +18,9 @@ _INJECTED_LINE = (
     "  # BANTIS-ATTACK-SIM-INJECTED - safe to remove; written by the"
     " malicious-dependency scenario\n"
 )
+
+_BUILD_TIMEOUT_SECONDS = 180
+_OUTPUT_TAIL_CHARS = 2000
 
 
 class MaliciousDependencyScenario(Scenario):
@@ -50,10 +54,46 @@ class MaliciousDependencyScenario(Scenario):
         separator = "" if original == "" or original.endswith("\n") else "\n"
         _REQUIREMENTS_FILE.write_text(original + separator + _INJECTED_LINE)
 
+        try:
+            build = subprocess.run(
+                ["docker", "compose", "build", "api"],
+                cwd=_REPO_ROOT / "range",
+                capture_output=True,
+                text=True,
+                timeout=_BUILD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError:
+            return ScenarioResult(
+                status=ScenarioStatus.ERROR,
+                message="docker is not available in this environment",
+                details={},
+            )
+        except subprocess.TimeoutExpired:
+            return ScenarioResult(
+                status=ScenarioStatus.ERROR,
+                message=f"docker compose build did not finish within {_BUILD_TIMEOUT_SECONDS}s",
+                details={},
+            )
+
+        output_tail = (build.stdout + build.stderr)[-_OUTPUT_TAIL_CHARS:]
+        details = {
+            "injected_package": _INJECTED_LINE.split("#", 1)[0].strip(),
+            "build_returncode": build.returncode,
+            "build_output_tail": output_tail,
+        }
+
+        if build.returncode == 0:
+            return ScenarioResult(
+                status=ScenarioStatus.SUCCESS,
+                message="injected dependency was accepted — build succeeded",
+                details=details,
+            )
+
         return ScenarioResult(
-            status=ScenarioStatus.SUCCESS,
-            message="malicious dependency line injected",
-            details={"injected_package": _INJECTED_LINE.split("#", 1)[0].strip()},
+            status=ScenarioStatus.FAILURE,
+            message="injected dependency was rejected — build failed as expected",
+            details=details,
         )
 
     def cleanup(self) -> None:
