@@ -2,6 +2,7 @@ import json
 import logging
 
 import pytest
+
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
 from scenarios.noop import NoopScenario
 
