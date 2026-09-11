@@ -160,3 +160,16 @@ def test_cleanup_recovers_a_dirty_file_left_by_a_previous_uncleaned_run(requirem
     md.MaliciousDependencyScenario().cleanup()
 
     assert md._INJECTED_LINE not in requirements_file.read_text()
+
+
+def test_scenario_run_is_deterministic_across_repeated_runs(requirements_file, monkeypatch):
+    monkeypatch.setattr(md.subprocess, "run", _stub_build(returncode=1, stderr="no matching distribution"))
+
+    outcomes = []
+    for _ in range(3):
+        scenario = md.MaliciousDependencyScenario()
+        result = scenario.run()
+        outcomes.append((result.status, result.message, result.details["build_returncode"]))
+        scenario.cleanup()
+
+    assert len(set(outcomes)) == 1
