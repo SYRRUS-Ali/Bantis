@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from types import SimpleNamespace
 
@@ -110,3 +111,22 @@ def test_run_twice_without_cleanup_is_rejected(requirements_file, monkeypatch):
 
     assert second.status == ScenarioStatus.ERROR
     assert "already contains" in second.message
+
+
+def test_log_result_emits_schema_shaped_event(requirements_file, monkeypatch, caplog: pytest.LogCaptureFixture):
+    monkeypatch.setattr(md.subprocess, "run", _stub_build(returncode=1, stderr="no matching distribution"))
+
+    scenario = md.MaliciousDependencyScenario()
+    result = scenario.run()
+
+    with caplog.at_level(logging.INFO, logger="attack_sim"):
+        scenario.log_result(result)
+    scenario.cleanup()
+
+    record = caplog.records[0]
+    assert record.source == "attack-sim"
+    assert record.event_type == "attack_scenario_run"
+    assert record.details["scenario"] == "malicious-dependency"
+    assert record.details["mitre_technique"] == "T1195.001"
+    assert record.details["status"] == "failure"
+    assert record.details["build_returncode"] == 1
