@@ -97,7 +97,15 @@ class MaliciousDependencyScenario(Scenario):
         )
 
     def cleanup(self) -> None:
-        if self._original_content is None:
+        if self._original_content is not None:
+            _REQUIREMENTS_FILE.write_text(self._original_content)
+            self._original_content = None
             return
-        _REQUIREMENTS_FILE.write_text(self._original_content)
-        self._original_content = None
+
+        # No run() happened in this instance (or it errored out before
+        # storing original content) — best-effort recovery in case a
+        # previous, uncleaned run left the file dirty.
+        if _REQUIREMENTS_FILE.is_file():
+            current = _REQUIREMENTS_FILE.read_text()
+            if _INJECTED_LINE in current:
+                _REQUIREMENTS_FILE.write_text(current.replace(_INJECTED_LINE, ""))

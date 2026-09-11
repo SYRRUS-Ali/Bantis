@@ -130,3 +130,33 @@ def test_log_result_emits_schema_shaped_event(requirements_file, monkeypatch, ca
     assert record.details["mitre_technique"] == "T1195.001"
     assert record.details["status"] == "failure"
     assert record.details["build_returncode"] == 1
+
+
+def test_cleanup_restores_original_content(requirements_file, monkeypatch):
+    original = requirements_file.read_text()
+    monkeypatch.setattr(md.subprocess, "run", _stub_build(returncode=1))
+
+    scenario = md.MaliciousDependencyScenario()
+    scenario.run()
+    assert requirements_file.read_text() != original
+
+    scenario.cleanup()
+
+    assert requirements_file.read_text() == original
+
+
+def test_cleanup_without_run_does_not_touch_a_clean_file(requirements_file):
+    original = requirements_file.read_text()
+
+    md.MaliciousDependencyScenario().cleanup()
+
+    assert requirements_file.read_text() == original
+
+
+def test_cleanup_recovers_a_dirty_file_left_by_a_previous_uncleaned_run(requirements_file):
+    dirty = requirements_file.read_text() + md._INJECTED_LINE
+    requirements_file.write_text(dirty)
+
+    md.MaliciousDependencyScenario().cleanup()
+
+    assert md._INJECTED_LINE not in requirements_file.read_text()
