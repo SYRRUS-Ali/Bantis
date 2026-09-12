@@ -14,19 +14,22 @@ dependencies or lifecycle, even though both are Python.
 ```
 attack-sim/
 ├── scenarios/        # Scenario interface + individual scenario implementations
-│   ├── base.py        # Scenario ABC: run(), cleanup(), log_result()
-│   └── noop.py         # No-op scenario used to test the interface itself
+│   ├── base.py                  # Scenario ABC: run(), cleanup(), log_result()
+│   ├── noop.py                   # No-op scenario used to test the interface itself
+│   ├── malicious_dependency.py   # Scenario 1: malicious dependency injection
+│   └── leaked_secret.py          # Scenario 2: leaked secret exploitation
 ├── logging_config.py  # JSON structured logging, matching docs/event-schema.md
-├── tests/              # Unit tests for the interface
+├── tests/              # Unit tests for the interface and each scenario
 └── requirements.txt
 ```
 
 ## Status
 
-Interface and a no-op test scenario only — the four real scenarios
-(malicious dependency, leaked secret, compromised CI step, typosquatting)
-are not implemented yet. See [`docs/scenarios-plan.md`](../docs/scenarios-plan.md)
-for the planned build order.
+Two of the four planned scenarios are implemented: malicious dependency
+injection and leaked secret exploitation. See
+[`docs/scenarios.md`](../docs/scenarios.md) for how the two compare, and
+[`docs/scenarios-plan.md`](../docs/scenarios-plan.md) for the remaining
+two (compromised CI step, typosquatting) and the overall build order.
 
 ## Running the tests
 
