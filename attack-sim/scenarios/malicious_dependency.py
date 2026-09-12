@@ -1,8 +1,3 @@
-"""Scenario: Malicious Dependency Injection.
-
-See docs/scenarios/malicious-dependency.md for the full writeup.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -22,13 +17,13 @@ _INJECTED_LINE = (
 _BUILD_TIMEOUT_SECONDS = 180
 _OUTPUT_TAIL_CHARS = 2000
 
-
 class MaliciousDependencyScenario(Scenario):
     name = "malicious-dependency"
     mitre_technique = "T1195.001"
 
     def __init__(self) -> None:
         self._original_content: str | None = None
+        self._build_succeeded = False
 
     def run(self) -> ScenarioResult:
         if not _REQUIREMENTS_FILE.is_file():
@@ -47,10 +42,6 @@ class MaliciousDependencyScenario(Scenario):
             )
 
         self._original_content = original
-        # requirements.txt isn't guaranteed to end with a newline — appending
-        # blindly would otherwise glue the injected line onto the end of the
-        # last existing one, producing an invalid requirement string instead
-        # of a second line.
         separator = "" if original == "" or original.endswith("\n") else "\n"
         _REQUIREMENTS_FILE.write_text(original + separator + _INJECTED_LINE)
 
@@ -84,6 +75,7 @@ class MaliciousDependencyScenario(Scenario):
         }
 
         if build.returncode == 0:
+            self._build_succeeded = True
             return ScenarioResult(
                 status=ScenarioStatus.SUCCESS,
                 message="injected dependency was accepted — build succeeded",
@@ -100,12 +92,26 @@ class MaliciousDependencyScenario(Scenario):
         if self._original_content is not None:
             _REQUIREMENTS_FILE.write_text(self._original_content)
             self._original_content = None
+
+            if self._build_succeeded:
+                self._rebuild()
+                self._build_succeeded = False
             return
 
-        # No run() happened in this instance (or it errored out before
-        # storing original content) — best-effort recovery in case a
-        # previous, uncleaned run left the file dirty.
         if _REQUIREMENTS_FILE.is_file():
             current = _REQUIREMENTS_FILE.read_text()
             if _INJECTED_LINE in current:
                 _REQUIREMENTS_FILE.write_text(current.replace(_INJECTED_LINE, ""))
+
+    def _rebuild(self) -> None:
+        try:
+            subprocess.run(
+                ["docker", "compose", "build", "api"],
+                cwd=_REPO_ROOT / "range",
+                capture_output=True,
+                text=True,
+                timeout=_BUILD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass

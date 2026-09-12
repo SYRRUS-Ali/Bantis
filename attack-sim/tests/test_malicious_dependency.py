@@ -10,8 +10,6 @@ from scenarios.base import ScenarioStatus
 
 @pytest.fixture
 def requirements_file(tmp_path, monkeypatch):
-    """Points the scenario at a throwaway file instead of the real
-    range/api/requirements.txt, so these tests never touch the repo."""
     path = tmp_path / "requirements.txt"
     path.write_text("fastapi==0.120.0\n")
     monkeypatch.setattr(md, "_REQUIREMENTS_FILE", path)
@@ -40,12 +38,6 @@ def test_run_injects_line_before_building(requirements_file, monkeypatch):
 
 
 def test_run_appends_a_new_line_even_without_a_trailing_newline(requirements_file, monkeypatch):
-    """Regression test: range/api/requirements.txt doesn't end with a
-    trailing newline, and the first version of this scenario appended
-    directly onto the last line instead of starting a new one, producing
-    an invalid requirement string. Caught by running the real scenario
-    against the real file three times — see the malicious-dependency
-    scenario commit history."""
     requirements_file.write_text("fastapi==0.120.0")  # no trailing newline
     seen = {}
 
@@ -143,6 +135,60 @@ def test_cleanup_restores_original_content(requirements_file, monkeypatch):
     scenario.cleanup()
 
     assert requirements_file.read_text() == original
+
+
+def test_cleanup_rebuilds_after_a_successful_run(requirements_file, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(md.subprocess, "run", fake_run)
+
+    scenario = md.MaliciousDependencyScenario()
+    scenario.run()
+    assert len(calls) == 1
+
+    scenario.cleanup()
+
+    assert len(calls) == 2
+    assert calls[1] == ["docker", "compose", "build", "api"]
+    assert requirements_file.read_text() == "fastapi==0.120.0\n"
+
+
+def test_cleanup_does_not_rebuild_after_a_failed_run(requirements_file, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stdout="", stderr="no matching distribution")
+
+    monkeypatch.setattr(md.subprocess, "run", fake_run)
+
+    scenario = md.MaliciousDependencyScenario()
+    scenario.run()
+    scenario.cleanup()
+
+    assert len(calls) == 1
+
+
+def test_cleanup_rebuild_failure_does_not_raise(requirements_file, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(md.subprocess, "run", fake_run)
+
+    scenario = md.MaliciousDependencyScenario()
+    scenario.run()
+    scenario.cleanup()
+
+    assert requirements_file.read_text() == "fastapi==0.120.0\n"
 
 
 def test_cleanup_without_run_does_not_touch_a_clean_file(requirements_file):
