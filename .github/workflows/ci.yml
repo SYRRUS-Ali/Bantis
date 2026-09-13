@@ -440,8 +440,18 @@ jobs:
     steps:
       - name: Determine pipeline status
         id: status
+        env:
+          R_BUILD: ${{ needs.build.result }}
+          R_TEST: ${{ needs.test.result }}
+          R_SAST: ${{ needs.sast.result }}
+          R_SECRETS_SCAN: ${{ needs.secrets-scan.result }}
+          R_DEPENDENCY_SCAN: ${{ needs.dependency-scan.result }}
+          R_ATTACK_SIM: ${{ needs.attack-sim-test.result }}
+          R_PUSH: ${{ needs.push.result }}
+          R_DEPLOY_STAGING: ${{ needs.deploy-staging.result }}
+          R_PROMOTE_LATEST: ${{ needs.promote-latest.result }}
         run: |
-          RESULTS="${{ needs.build.result }} ${{ needs.test.result }} ${{ needs.sast.result }} ${{ needs.secrets-scan.result }} ${{ needs.dependency-scan.result }} ${{ needs.attack-sim-test.result }} ${{ needs.push.result }} ${{ needs.deploy-staging.result }} ${{ needs.promote-latest.result }}"
+          RESULTS="$R_BUILD $R_TEST $R_SAST $R_SECRETS_SCAN $R_DEPENDENCY_SCAN $R_ATTACK_SIM $R_PUSH $R_DEPLOY_STAGING $R_PROMOTE_LATEST"
           if echo "$RESULTS" | grep -q "failure"; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
             echo "emoji=❌" >> "$GITHUB_OUTPUT"
@@ -450,10 +460,39 @@ jobs:
             echo "emoji=✅" >> "$GITHUB_OUTPUT"
           fi
 
+          # Per-job pass/fail breakdown so a failure notification says
+          # exactly which job broke — built only from each job's `result`
+          # enum (never step output or log content), so there's nothing
+          # here that could carry a secret or scanner finding.
+          job_line() {
+            case "$2" in
+              success)   echo "✅ $1" ;;
+              failure)   echo "❌ $1 — FAILED HERE" ;;
+              cancelled) echo "⛔ $1 (cancelled)" ;;
+              skipped)   echo "⏭️ $1 (skipped)" ;;
+              *)         echo "❔ $1 ($2)" ;;
+            esac
+          }
+
+          {
+            echo "report<<BANTIS_REPORT_EOF"
+            job_line "Build Docker Image" "$R_BUILD"
+            job_line "Test & Lint" "$R_TEST"
+            job_line "SAST (Semgrep)" "$R_SAST"
+            job_line "Secret Scanning (Gitleaks)" "$R_SECRETS_SCAN"
+            job_line "Dependency Scan (pip-audit)" "$R_DEPENDENCY_SCAN"
+            job_line "Attack-Sim Tests" "$R_ATTACK_SIM"
+            job_line "Push to GHCR" "$R_PUSH"
+            job_line "Deploy (Staging)" "$R_DEPLOY_STAGING"
+            job_line "Promote to Latest" "$R_PROMOTE_LATEST"
+            echo "BANTIS_REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Send Telegram notification
         env:
           STATUS_EMOJI: ${{ steps.status.outputs.emoji }}
           STATUS_TEXT: ${{ steps.status.outputs.status }}
+          JOB_REPORT: ${{ steps.status.outputs.report }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
@@ -466,6 +505,13 @@ jobs:
           Commit: \`${COMMIT_SHA}\`
           By: ${ACTOR}
           Run: ${RUN_URL}"
+
+          if [ "${STATUS_TEXT}" = "failure" ]; then
+            MESSAGE="${MESSAGE}
+
+          *Job report:*
+          ${JOB_REPORT}"
+          fi
 
           curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
