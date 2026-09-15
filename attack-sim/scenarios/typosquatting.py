@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.replay import register
 
 _FAKE_PACKAGE_NAME = "redsi"
 _FAKE_PACKAGE_VERSION = "0.0.1"
@@ -55,6 +56,7 @@ def _build_fake_wheel(dest_dir: Path, name: str, version: str) -> Path:
     return wheel_path
 
 
+@register
 class TyposquattingScenario(Scenario):
     name = "typosquatting"
     mitre_technique = "T1195.001"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.replay import register
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_FILE = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -18,6 +19,7 @@ _INJECTED_STEP = (
 
 _STEPS_ANCHOR = "    steps:\n"
 
+@register
 class CompromisedCiStepScenario(Scenario):
     name = "compromised-ci-step"
     mitre_technique = "T1195.002"
