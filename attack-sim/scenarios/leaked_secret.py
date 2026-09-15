@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.replay import register
 
 _SCAN_TIMEOUT_SECONDS = 60
 _OUTPUT_TAIL_CHARS = 2000
@@ -21,6 +22,7 @@ _LEAKED_FILE_CONTENT = (
 )
 
 
+@register
 class LeakedSecretScenario(Scenario):
     name = "leaked-secret"
     mitre_technique = "T1552.001"
