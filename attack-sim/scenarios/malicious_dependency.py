@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.replay import register
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REQUIREMENTS_FILE = _REPO_ROOT / "range" / "api" / "requirements.txt"
@@ -17,6 +18,7 @@ _INJECTED_LINE = (
 _BUILD_TIMEOUT_SECONDS = 180
 _OUTPUT_TAIL_CHARS = 2000
 
+@register
 class MaliciousDependencyScenario(Scenario):
     name = "malicious-dependency"
     mitre_technique = "T1195.001"
