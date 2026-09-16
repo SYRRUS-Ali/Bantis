@@ -1,15 +1,10 @@
-"""A no-op scenario used to test the attack-sim interface itself.
-
-Runs no real attack — it exists purely so the Scenario interface, its
-logging, and its test suite have something concrete to exercise without
-needing a real target or a real MITRE technique.
-"""
-
 from __future__ import annotations
 
 from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.replay import register
 
 
+@register
 class NoopScenario(Scenario):
     name = "noop"
     mitre_technique = "N/A"

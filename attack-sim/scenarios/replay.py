@@ -10,9 +10,12 @@ _REGISTRY: dict[str, type[Scenario]] = {}
 
 
 def register(scenario_cls: _ScenarioT) -> _ScenarioT:
-    """Class decorator: makes a scenario replayable by its `name`."""
     _REGISTRY[scenario_cls.name] = scenario_cls
     return scenario_cls
+
+
+def available() -> dict[str, type[Scenario]]:
+    return dict(_REGISTRY)
 
 
 def replay(scenario_id: str) -> ScenarioResult:
