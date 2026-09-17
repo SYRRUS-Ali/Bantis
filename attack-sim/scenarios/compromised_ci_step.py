@@ -60,7 +60,7 @@ class CompromisedCiStepScenario(Scenario):
         return ScenarioResult(
             status=ScenarioStatus.SUCCESS,
             message="injected a step that only logs suspicious execution — no real pipeline effect",
-            details={"injected_step_marker": _STEP_MARKER, "path": str(_WORKFLOW_FILE)},
+            details={"artifact": _STEP_MARKER, "path": str(_WORKFLOW_FILE)},
         )
 
     def cleanup(self) -> None:

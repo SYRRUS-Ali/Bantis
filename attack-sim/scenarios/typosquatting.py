@@ -104,10 +104,10 @@ class TyposquattingScenario(Scenario):
 
         output_tail = (install.stdout + install.stderr)[-_OUTPUT_TAIL_CHARS:]
         details = {
-            "typosquatted_package": f"{_FAKE_PACKAGE_NAME}=={_FAKE_PACKAGE_VERSION}",
+            "artifact": f"{_FAKE_PACKAGE_NAME}=={_FAKE_PACKAGE_VERSION}",
             "impersonates": _IMPERSONATES,
-            "install_returncode": install.returncode,
-            "install_output_tail": output_tail,
+            "tool_returncode": install.returncode,
+            "tool_output_tail": output_tail,
             "install_target": str(install_dir),
             "wheel_path": str(wheel_path),
         }

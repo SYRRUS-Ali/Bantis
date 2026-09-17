@@ -81,8 +81,8 @@ def test_run_returns_failure_when_gitleaks_catches_the_secret(monkeypatch):
     result = ls.LeakedSecretScenario().run()
 
     assert result.status == ScenarioStatus.FAILURE
-    assert result.details["gitleaks_returncode"] == 1
-    assert "aws-access-token" in result.details["gitleaks_output_tail"]
+    assert result.details["tool_returncode"] == 1
+    assert "aws-access-token" in result.details["tool_output_tail"]
 
 
 def test_run_returns_success_when_gitleaks_misses_the_secret(monkeypatch):
@@ -99,7 +99,7 @@ def test_run_returns_error_on_unexpected_gitleaks_exit_code(monkeypatch):
     result = ls.LeakedSecretScenario().run()
 
     assert result.status == ScenarioStatus.ERROR
-    assert result.details["gitleaks_returncode"] == 2
+    assert result.details["tool_returncode"] == 2
 
 
 def test_run_returns_error_when_gitleaks_is_missing(monkeypatch):
@@ -160,7 +160,7 @@ def test_log_result_emits_schema_shaped_event(monkeypatch, caplog: pytest.LogCap
     assert record.details["scenario"] == "leaked-secret"
     assert record.details["mitre_technique"] == "T1552.001"
     assert record.details["status"] == "failure"
-    assert record.details["gitleaks_returncode"] == 1
+    assert record.details["tool_returncode"] == 1
 
 
 def test_cleanup_removes_the_scratch_repo(fake_gitleaks):
@@ -186,7 +186,7 @@ def test_scenario_run_is_deterministic_across_repeated_runs(monkeypatch):
     for _ in range(3):
         scenario = ls.LeakedSecretScenario()
         result = scenario.run()
-        outcomes.append((result.status, result.message, result.details["gitleaks_returncode"]))
+        outcomes.append((result.status, result.message, result.details["tool_returncode"]))
         scenario.cleanup()
 
     assert len(set(outcomes)) == 1

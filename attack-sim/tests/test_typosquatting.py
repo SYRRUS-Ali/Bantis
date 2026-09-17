@@ -24,8 +24,8 @@ def test_run_installs_the_fake_package_into_an_isolated_target():
     result = scenario.run()
 
     assert result.status == ScenarioStatus.SUCCESS
-    assert result.details["install_returncode"] == 0
-    assert result.details["typosquatted_package"] == "redsi==0.0.1"
+    assert result.details["tool_returncode"] == 0
+    assert result.details["artifact"] == "redsi==0.0.1"
 
     scenario.cleanup()
 
@@ -76,7 +76,7 @@ def test_scenario_run_is_deterministic_across_repeated_runs():
     for _ in range(3):
         scenario = ts.TyposquattingScenario()
         result = scenario.run()
-        outcomes.append((result.status, result.details["install_returncode"]))
+        outcomes.append((result.status, result.details["tool_returncode"]))
         scenario.cleanup()
 
     assert len(set(outcomes)) == 1

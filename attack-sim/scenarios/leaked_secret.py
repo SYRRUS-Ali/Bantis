@@ -104,9 +104,9 @@ class LeakedSecretScenario(Scenario):
 
         output_tail = (scan.stdout + scan.stderr)[-_OUTPUT_TAIL_CHARS:]
         details = {
-            "leaked_file": _LEAKED_FILE_NAME,
-            "gitleaks_returncode": scan.returncode,
-            "gitleaks_output_tail": output_tail,
+            "artifact": _LEAKED_FILE_NAME,
+            "tool_returncode": scan.returncode,
+            "tool_output_tail": output_tail,
         }
 
         if scan.returncode == 0:
