@@ -54,6 +54,31 @@ Individual scenarios may add further fields to `details` beyond these
 three (via `ScenarioResult.details`) — this table lists only what every
 scenario is guaranteed to include.
 
+#### Common `details` extras
+
+Reviewed across all four implemented scenarios
+(`malicious-dependency`, `leaked-secret`, `compromised-ci-step`,
+`typosquatting`): three concepts recur across most of them, and every
+scenario now uses the same field name for each rather than inventing its
+own (earlier revisions used `build_returncode`/`gitleaks_returncode`/
+`install_returncode` and `injected_package`/`leaked_file`/
+`typosquatted_package` for the same underlying concepts — unified below
+so a Detection Engine, or a human, can query one field name regardless
+of which scenario emitted the event).
+
+| Field              | Type   | Notes                                                                      |
+|--------------------|--------|-------------------------------------------------------------------------------|
+| `artifact`         | string | Identifier of what the scenario introduced — a dependency line, a leaked file name, an injected CI step marker, a typosquatted package spec. |
+| `tool_returncode`  | int    | Exit code of the external tool that verified the scenario's effect (`docker`, `gitleaks`, `pip`). Omitted entirely when no such tool runs. |
+| `tool_output_tail` | string | The last ~2000 characters of that tool's combined stdout+stderr. Omitted alongside `tool_returncode`. |
+
+This is a naming convention, not a fourth guaranteed field — a scenario
+with no external tool to verify against (today: `compromised-ci-step`)
+omits `tool_returncode`/`tool_output_tail` rather than reporting a
+meaningless value, but still uses `artifact`. Any new scenario should
+reuse these three names for the same concepts instead of inventing new
+ones.
+
 ## Known limitation
 `api` and `nginx` report request duration in different units
 (`duration_ms` vs `duration_seconds`) because nginx's `$request_time`
