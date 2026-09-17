@@ -60,8 +60,8 @@ def test_run_returns_failure_when_build_rejects_package(requirements_file, monke
     result = md.MaliciousDependencyScenario().run()
 
     assert result.status == ScenarioStatus.FAILURE
-    assert result.details["build_returncode"] == 1
-    assert "no matching distribution" in result.details["build_output_tail"]
+    assert result.details["tool_returncode"] == 1
+    assert "no matching distribution" in result.details["tool_output_tail"]
 
 
 def test_run_returns_success_when_build_unexpectedly_passes(requirements_file, monkeypatch):
@@ -121,7 +121,7 @@ def test_log_result_emits_schema_shaped_event(requirements_file, monkeypatch, ca
     assert record.details["scenario"] == "malicious-dependency"
     assert record.details["mitre_technique"] == "T1195.001"
     assert record.details["status"] == "failure"
-    assert record.details["build_returncode"] == 1
+    assert record.details["tool_returncode"] == 1
 
 
 def test_cleanup_restores_original_content(requirements_file, monkeypatch):
@@ -215,7 +215,7 @@ def test_scenario_run_is_deterministic_across_repeated_runs(requirements_file, m
     for _ in range(3):
         scenario = md.MaliciousDependencyScenario()
         result = scenario.run()
-        outcomes.append((result.status, result.message, result.details["build_returncode"]))
+        outcomes.append((result.status, result.message, result.details["tool_returncode"]))
         scenario.cleanup()
 
     assert len(set(outcomes)) == 1

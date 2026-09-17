@@ -71,9 +71,9 @@ class MaliciousDependencyScenario(Scenario):
 
         output_tail = (build.stdout + build.stderr)[-_OUTPUT_TAIL_CHARS:]
         details = {
-            "injected_package": _INJECTED_LINE.split("#", 1)[0].strip(),
-            "build_returncode": build.returncode,
-            "build_output_tail": output_tail,
+            "artifact": _INJECTED_LINE.split("#", 1)[0].strip(),
+            "tool_returncode": build.returncode,
+            "tool_output_tail": output_tail,
         }
 
         if build.returncode == 0:
