@@ -242,6 +242,9 @@ jobs:
       - name: Run unit tests
         run: python -m pytest tests -v
 
+      - name: Run scenario fingerprint tests
+        run: python -m pytest tests -m fingerprint -v
+
   push:
     name: Push to GHCR
     runs-on: ubuntu-latest
