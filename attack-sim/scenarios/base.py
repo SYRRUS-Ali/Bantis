@@ -7,12 +7,34 @@ docs/event-schema.md for the event envelope log_result() emits.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
 logger = logging.getLogger("attack_sim")
+
+_ENV_VAR = "BANTIS_ENV"
+_REQUIRED_ENV_VALUE = "range-local"
+
+
+class ScenarioEnvironmentError(RuntimeError):
+    """Raised when a scenario is instantiated without BANTIS_ENV set to
+    range-local. Every scenario mutates or executes something for real
+    (a file, a git repo, a real pip install) — this is the one barrier
+    that stops that from ever happening against an environment nobody
+    deliberately opted into."""
+
+
+def _check_environment() -> None:
+    actual = os.environ.get(_ENV_VAR)
+    if actual != _REQUIRED_ENV_VALUE:
+        raise ScenarioEnvironmentError(
+            f"refusing to run: {_ENV_VAR} must be set to {_REQUIRED_ENV_VALUE!r}, "
+            f"got {actual!r}. Set {_ENV_VAR}={_REQUIRED_ENV_VALUE} to confirm this "
+            "is the disposable local range before running any attack-sim scenario."
+        )
 
 
 class ScenarioStatus(str, Enum):
@@ -43,6 +65,10 @@ class Scenario(ABC):
 
     name: str
     mitre_technique: str
+
+    def __new__(cls, *args, **kwargs):
+        _check_environment()
+        return super().__new__(cls)
 
     @abstractmethod
     def run(self) -> ScenarioResult:
