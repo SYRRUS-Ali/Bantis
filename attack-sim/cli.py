@@ -10,11 +10,13 @@ from scenarios import (
     noop,
     typosquatting,
 )
-from scenarios.base import ScenarioStatus
+from scenarios.base import ScenarioEnvironmentError, ScenarioStatus
 from scenarios.replay import available, replay
 
 
 def _cmd_list(_args: argparse.Namespace) -> int:
+    # Reads class attributes only — never instantiates a scenario — so
+    # this is exempt from the BANTIS_ENV guard by construction.
     for scenario_id, scenario_cls in sorted(available().items()):
         print(f"{scenario_id:<24} {scenario_cls.mitre_technique}")
     return 0
@@ -23,7 +25,7 @@ def _cmd_list(_args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
         result = replay(args.scenario)
-    except KeyError as exc:
+    except (KeyError, ScenarioEnvironmentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -40,7 +42,12 @@ def _cmd_cleanup(args: argparse.Namespace) -> int:
         )
         return 1
 
-    scenario_cls().cleanup()
+    try:
+        scenario_cls().cleanup()
+    except ScenarioEnvironmentError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     print(f"cleanup complete: {args.scenario}")
     return 0
 
