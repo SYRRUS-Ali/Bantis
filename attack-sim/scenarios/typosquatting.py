@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.base import Scenario, ScenarioResult, ScenarioStatus, logger
 from scenarios.replay import register
 
 _FAKE_PACKAGE_NAME = "redsi"
@@ -127,5 +127,13 @@ class TyposquattingScenario(Scenario):
 
     def cleanup(self) -> None:
         if self._workdir is not None:
-            shutil.rmtree(self._workdir, ignore_errors=True)
+            workdir = self._workdir
             self._workdir = None
+            try:
+                shutil.rmtree(workdir)
+            except OSError:
+                logger.warning(
+                    "failed to remove scratch install — it still contains the typosquatted package",
+                    extra={"scenario": self.name, "path": str(workdir)},
+                )
+                raise
