@@ -111,6 +111,61 @@ $ python cli.py run noop
 success: no-op scenario executed
 ```
 
+## Known issues
+
+Real problems found during a 2026-09-20 isolation/cleanup review — not
+hypothetical ones. Same honest what/why/fix format as
+[`docs/known-issues.md`](../docs/known-issues.md), scoped to attack-sim.
+
+### `cleanup()` could silently fail to remove its own scratch state
+
+**Symptom:** `leaked_secret.py` and `typosquatting.py` both called
+`shutil.rmtree(self._workdir, ignore_errors=True)`. If that removal ever
+failed for any reason (a permissions issue, a file still open, a locked
+handle), `cleanup()` returned normally — no exception, no log line — even
+though the scratch directory (still holding the fake secret or the fake
+package) was never actually deleted.
+
+**Root cause:** every existing test for these two scenarios only ever
+exercised the path where `rmtree` succeeds — nothing forced a failure, so
+nothing caught that "success" and "actual success" had quietly diverged.
+This is exactly backwards for a scenario whose whole safety story is "no
+trace left on disk" (see `test_cleanup_leaves_no_trace_of_the_secret_on_disk`
+and its typosquatting equivalent, both of which only ever asserted the
+happy path).
+
+**Fix:** dropped `ignore_errors=True`; a failed removal now logs a clear
+warning through the shared `attack_sim` logger and re-raises, so both
+`replay()` and the CLI surface it instead of reporting a clean state that
+isn't real. `cli.py`'s `run`/`cleanup` commands catch this as a plain
+`error: ...` message (exit code `1`), not a raw traceback. Verified with
+tests that force the removal to fail — confirmed those tests actually
+fail against the old `ignore_errors=True` code before trusting the fix.
+
+### A failed post-cleanup rebuild left no signal at all
+
+**Symptom:** `malicious_dependency.py`'s `_rebuild()` (added after a
+successful run, to replace a Docker image built with the poisoned
+dependency — see `docs/scenarios/malicious-dependency.md`'s documented
+cleanup contract) caught `FileNotFoundError`/`TimeoutExpired` and did
+nothing else, and never checked the rebuild's own `returncode` at all —
+so even a rebuild that ran and failed outright (docker daemon
+unreachable, transient build error) was treated identically to success.
+
+**Fix:** both failure paths (the rebuild raising, and the rebuild running
+but returning non-zero) now log a warning naming the scenario and the
+reason — still best-effort (a docker rebuild failing shouldn't crash
+`cleanup()`, unlike the scratch-directory case above), but no longer
+silent. The source file is still correctly reverted either way; only the
+image-rebuild step's own success is what's now visible when it isn't
+guaranteed.
+
+Confirmed clean by the same review: `compromised-ci-step`'s cleanup (pure
+file writes, nothing swallowed) and the `BANTIS_ENV` guard's own failure
+paths (already raise loudly by design). A full `/tmp` and `git status`
+snapshot diff across the entire test suite, before and after, showed zero
+residual state beyond pytest's own managed temp directories.
+
 ## Running the tests
 
 ```bash
