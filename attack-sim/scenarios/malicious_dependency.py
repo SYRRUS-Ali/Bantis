@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from scenarios.base import Scenario, ScenarioResult, ScenarioStatus
+from scenarios.base import Scenario, ScenarioResult, ScenarioStatus, logger
 from scenarios.replay import register
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -107,7 +107,7 @@ class MaliciousDependencyScenario(Scenario):
 
     def _rebuild(self) -> None:
         try:
-            subprocess.run(
+            rebuild = subprocess.run(
                 ["docker", "compose", "build", "api"],
                 cwd=_REPO_ROOT / "range",
                 capture_output=True,
@@ -115,5 +115,15 @@ class MaliciousDependencyScenario(Scenario):
                 timeout=_BUILD_TIMEOUT_SECONDS,
                 check=False,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "rebuild after cleanup did not run — the api image may still be poisoned",
+                extra={"scenario": self.name, "reason": str(exc)},
+            )
+            return
+
+        if rebuild.returncode != 0:
+            logger.warning(
+                "rebuild after cleanup failed — the api image may still be poisoned",
+                extra={"scenario": self.name, "returncode": rebuild.returncode},
+            )
