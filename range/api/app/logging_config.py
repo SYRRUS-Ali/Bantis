@@ -2,8 +2,11 @@ import json
 import logging
 import os
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+
+_ALLOWED_URL_SCHEMES = {"http", "https"}
 
 _RESERVED_ATTRS = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
@@ -37,6 +40,11 @@ class JSONFormatter(logging.Formatter):
 class DetectionEngineHandler(logging.Handler):
     def __init__(self, base_url: str, timeout: float = 2.0) -> None:
         super().__init__()
+        scheme = urllib.parse.urlparse(base_url).scheme
+        if scheme not in _ALLOWED_URL_SCHEMES:
+            raise ValueError(
+                f"DETECTION_ENGINE_URL must be http or https, got {scheme!r} in {base_url!r}"
+            )
         self._url = base_url.rstrip("/") + "/events"
         self._timeout = timeout
 
