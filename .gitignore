@@ -11,6 +11,9 @@ venv/
 # Local SQLite databases (e.g. detection-engine's default DATABASE_URL)
 *.db
 
+# Semgrep scan output (CI's own artifact, never meant to be committed)
+*.sarif
+
 # OS
 .DS_Store
 
