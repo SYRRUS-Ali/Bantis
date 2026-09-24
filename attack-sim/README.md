@@ -111,6 +111,28 @@ $ python cli.py run noop
 success: no-op scenario executed
 ```
 
+## Detection Engine forwarding
+
+Optional — set `DETECTION_ENGINE_URL` and every scenario's
+`log_result()` event is forwarded to
+[`detection-engine`](../detection-engine)'s `POST /events` in real time:
+
+```bash
+export BANTIS_ENV=range-local
+export DETECTION_ENGINE_URL=http://localhost:8000
+python cli.py run malicious-dependency
+```
+
+Leave it unset and nothing changes — forwarding only activates when the
+CLI is run directly (`python cli.py ...`), never when a test calls
+`cli.main([...])` in-process, so the test suite's own logging capture is
+never affected by this. `logging_config.py`'s `DetectionEngineHandler`
+only forwards **envelope-shaped** records (ones carrying an `event_id`)
+— a bare `logger.warning()` call, like the ones scenarios make on a
+cleanup failure, is correctly skipped rather than rejected by
+`/events`' required fields. Full detail on the forwarding contract:
+[`detection-engine/README.md`](../detection-engine/README.md#status).
+
 ## Known issues
 
 Real problems found during a 2026-09-20 isolation/cleanup review — not

@@ -36,6 +36,32 @@ into rows in `incidents`. That's separate, later work, building directly
 on [`docs/correlation-design.md`](../docs/correlation-design.md)'s two
 patterns.
 
+**Both real producers are wired up.** `range/api` and `attack-sim` each
+carry a `DetectionEngineHandler` logging handler (in their own
+`logging_config.py` — duplicated, not shared, same reasoning as
+attack-sim's existing standalone copy of the JSON formatter) that
+forwards every event to `POST /events` here. It's opt-in per producer:
+set `DETECTION_ENGINE_URL` and it activates; leave it unset and nothing
+changes. See [`range/.env.example`](../range/.env.example) and
+[`attack-sim/README.md`](../attack-sim/README.md#detection-engine-forwarding).
+
+Only **envelope-shaped** log records are forwarded — anything without an
+`event_id` (uvicorn's own startup lines, a scenario's
+`logger.warning()` on a cleanup failure) is silently skipped, never
+POSTed, matching `docs/event-schema.md`'s own distinction between a
+security-relevant event and "a routine operational log line."
+
+Forwarding is **synchronous and best-effort**: each `emit()` call blocks
+on the HTTP POST (short timeout, 2s) and swallows any failure, writing it
+to stderr instead of raising — logging must never crash or block the app
+it's instrumenting. Known limitation, not an oversight: a slow or
+unreachable detection-engine adds up to that 2s to every event-emitting
+call in the producer (a scenario's `run()`, an API request) rather than
+being decoupled via a background queue. Acceptable for v1 given
+forwarding is opt-in and detection-engine is expected to be running
+locally alongside its producers; revisit if this ever needs to tolerate
+a genuinely unreliable or remote detection-engine.
+
 ## Database
 
 No `docker-compose`/`.env` setup exists for this service yet (unlike
