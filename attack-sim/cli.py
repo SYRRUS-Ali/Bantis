@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from scenarios import (
@@ -10,6 +11,7 @@ from scenarios import (
     noop,
     typosquatting,
 )
+from logging_config import configure_logging
 from scenarios.base import ScenarioEnvironmentError, ScenarioStatus
 from scenarios.replay import available, replay
 
@@ -83,4 +85,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_logging(level=os.environ.get("LOG_LEVEL") or "INFO")
     raise SystemExit(main())

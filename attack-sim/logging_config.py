@@ -1,16 +1,10 @@
-"""JSON structured logging, matching the shape used by range/api.
-
-A standalone copy rather than an import from
-range/api/app/logging_config.py — attack-sim and range are independently
-deployable, and this is a small enough chunk of stdlib-only code that a
-cross-component dependency isn't worth it.
-"""
-
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import urllib.request
 from datetime import datetime, timezone
 
 _RESERVED_ATTRS = {
@@ -22,7 +16,6 @@ _RESERVED_ATTRS = {
 
 
 class JSONFormatter(logging.Formatter):
-    """Renders each log record as a single JSON line."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
@@ -42,10 +35,42 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class DetectionEngineHandler(logging.Handler):
+
+    def __init__(self, base_url: str, timeout: float = 2.0) -> None:
+        super().__init__()
+        self._url = base_url.rstrip("/") + "/events"
+        self._timeout = timeout
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not hasattr(record, "event_id"):
+            return
+
+        try:
+            payload = self.format(record).encode("utf-8")
+            request = urllib.request.Request(
+                self._url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(request, timeout=self._timeout)
+        except Exception as exc:
+            print(f"detection-engine forwarding failed: {exc}", file=sys.stderr)
+
+
 def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter())
 
     root = logging.getLogger()
-    root.handlers = [handler]
+    handlers = [handler]
+
+    detection_engine_url = os.environ.get("DETECTION_ENGINE_URL")
+    if detection_engine_url:
+        forwarder = DetectionEngineHandler(detection_engine_url)
+        forwarder.setFormatter(JSONFormatter())
+        handlers.append(forwarder)
+
+    root.handlers = handlers
     root.setLevel(level.upper())
