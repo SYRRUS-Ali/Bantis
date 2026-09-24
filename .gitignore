@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local SQLite databases (e.g. detection-engine's default DATABASE_URL)
+*.db
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
