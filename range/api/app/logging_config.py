@@ -1,11 +1,10 @@
 import json
 import logging
+import os
 import sys
+import urllib.request
 from datetime import datetime, timezone
 
-# Standard attributes every LogRecord carries. Anything else attached via
-# `extra={...}` on a log call is "our" data and gets merged into the JSON
-# output directly (e.g. method, path, status_code below).
 _RESERVED_ATTRS = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
     "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
@@ -35,21 +34,48 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class DetectionEngineHandler(logging.Handler):
+    def __init__(self, base_url: str, timeout: float = 2.0) -> None:
+        super().__init__()
+        self._url = base_url.rstrip("/") + "/events"
+        self._timeout = timeout
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not hasattr(record, "event_id"):
+            return
+
+        try:
+            payload = self.format(record).encode("utf-8")
+            request = urllib.request.Request(
+                self._url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(request, timeout=self._timeout)
+        except Exception as exc:
+            print(f"detection-engine forwarding failed: {exc}", file=sys.stderr)
+
+
 def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter())
 
     root = logging.getLogger()
-    root.handlers = [handler]
+    handlers = [handler]
+
+    detection_engine_url = os.environ.get("DETECTION_ENGINE_URL")
+    if detection_engine_url:
+        forwarder = DetectionEngineHandler(detection_engine_url)
+        forwarder.setFormatter(JSONFormatter())
+        handlers.append(forwarder)
+
+    root.handlers = handlers
     root.setLevel(level.upper())
 
-    # Route uvicorn's own log lines through the same JSON handler, so every
-    # line in the output has one consistent shape instead of mixing formats.
     for name in ("uvicorn", "uvicorn.error"):
         uv_logger = logging.getLogger(name)
         uv_logger.handlers = [handler]
         uv_logger.propagate = False
 
-    # Our own AccessLogMiddleware (app/middleware.py) replaces uvicorn's
-    # built-in access log, so disable the default to avoid duplicate lines.
     logging.getLogger("uvicorn.access").disabled = True
