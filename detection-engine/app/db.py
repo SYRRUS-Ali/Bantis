@@ -30,4 +30,9 @@ def get_session() -> Session:
 
 
 def init_db() -> None:
+    from app import event_models, incident_models
+
+    assert event_models.EventORM.__tablename__
+    assert incident_models.IncidentORM.__tablename__
+
     Base.metadata.create_all(bind=engine)
