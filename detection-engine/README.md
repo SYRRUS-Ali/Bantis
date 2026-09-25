@@ -19,22 +19,41 @@ detection-engine/
 │   ├── db.py                # SQLAlchemy engine/session, Base, init_db()
 │   ├── event_models.py       # EventORM table definition
 │   ├── incident_models.py    # IncidentORM table definition
-│   ├── models.py              # Pydantic schemas for the API (EventIn/EventOut)
+│   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's two patterns
+│   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut)
 │   └── routers/
-│       └── events.py           # POST /events — the ingestion endpoint
+│       └── events.py            # POST /events — the ingestion endpoint
 ├── tests/
 │   ├── test_events_endpoint.py
+│   ├── test_correlation.py
+│   ├── test_init_db.py
 │   └── requirements.txt
 └── requirements.txt
 ```
 
 ## Status
 
-Ingestion only. `events` and `incidents` tables both exist; only
-`events` is written to so far — nothing yet correlates rows in `events`
-into rows in `incidents`. That's separate, later work, building directly
-on [`docs/correlation-design.md`](../docs/correlation-design.md)'s two
-patterns.
+Ingestion, plus correlation as a callable function. `app/correlation.py`
+implements both patterns from
+[`docs/correlation-design.md`](../docs/correlation-design.md) —
+`correlate(events)` is the pure grouping logic (fed a list of `EventORM`,
+returns `IncidentORM` instances, no database involved); `run_correlation(session)`
+wires it to real stored data: loads every event not already claimed by a
+past incident, correlates them, and persists any new incidents.
+
+**Nothing calls `run_correlation()` automatically yet** — no scheduler,
+no endpoint triggers it on ingestion. It's a function ready to be wired
+in, same staged approach as every other piece of M3 so far (the
+ingestion endpoint existed for a day before either producer was
+connected to it). Run it manually for now:
+
+```python
+from app.db import SessionLocal
+from app.correlation import run_correlation
+
+with SessionLocal() as session:
+    new_incidents = run_correlation(session)
+```
 
 **Both real producers are wired up.** `range/api` and `attack-sim` each
 carry a `DetectionEngineHandler` logging handler (in their own
@@ -83,6 +102,25 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 curl http://localhost:8000/health
 ```
+
+## Known issues
+
+**A real app startup never created the `incidents` table.** Found while
+wiring up `app/correlation.py` on 2026-09-25 — `run_correlation()`
+immediately hit `sqlite3.OperationalError: no such table: incidents`
+against a freshly-started real app. Root cause: SQLAlchemy only registers
+a table with `Base.metadata` once its ORM model's module is actually
+imported, and nothing in the app's real startup path (`main.py` →
+`routers/events.py`) ever imported `incident_models` — only
+`event_models`, via the events router. `init_db()`'s
+`Base.metadata.create_all()` genuinely only ever knew about one table.
+**Fix:** `init_db()` now imports every model module itself before calling
+`create_all()`, so the metadata is guaranteed complete regardless of
+which routers happen to be wired up. Verified with a regression test
+that runs in a real subprocess (`tests/test_init_db.py`) — an in-process
+test would have silently passed either way, since every other test file
+in this suite eventually imports `incident_models` too and registers it
+for the rest of that pytest process.
 
 ## Running the tests
 
