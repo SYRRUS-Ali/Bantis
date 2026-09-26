@@ -81,6 +81,15 @@ forwarding is opt-in and detection-engine is expected to be running
 locally alongside its producers; revisit if this ever needs to tolerate
 a genuinely unreliable or remote detection-engine.
 
+**Ingestion validates the envelope, not just its shape.** `EventIn`
+(`app/models.py`) rejects an empty `level`/`logger`/`source`/`event_type`/
+`event_id` and an unrecognized `level` with a 422, rather than storing
+malformed data that would only surface later as a confusing, silent
+problem — e.g. every empty-`source` event quietly forming its own
+same-source-burst incident. `level` accepts any of Python's actual
+logging levels (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`), not just
+the `INFO`/`WARNING`/`ERROR` examples in `docs/event-schema.md`.
+
 ## Database
 
 No `docker-compose`/`.env` setup exists for this service yet (unlike
@@ -121,6 +130,22 @@ that runs in a real subprocess (`tests/test_init_db.py`) — an in-process
 test would have silently passed either way, since every other test file
 in this suite eventually imports `incident_models` too and registers it
 for the rest of that pytest process.
+
+**An `ERROR`-status scenario run was being correlated as if it were a
+real attack outcome.** Found on 2026-09-26 while actually running the
+real `malicious-dependency` and `leaked-secret` scenarios end-to-end
+against a live detection-engine (`../tests/test_e2e_composite_incident.py`)
+instead of only synthetic events — nothing constructs a synthetic
+`"error"` event by habit, so a unit test alone never surfaced this. A
+`leaked-secret` run that failed to even initialize its scratch git repo
+(`status: "error"`, per `docs/scenarios.md`'s distinction between "the
+scenario itself couldn't run" and a real success/failure verdict) was
+still getting composited with a real `malicious-dependency` failure,
+reporting a "high severity" incident that was only half real. **Fix:**
+`correlate()` now filters out every `status: "error"` event before
+either pattern in `docs/correlation-design.md` ever sees it. Verified
+with both synthetic regression tests (`tests/test_correlation.py`) and
+the real end-to-end scenario run.
 
 ## Running the tests
 
