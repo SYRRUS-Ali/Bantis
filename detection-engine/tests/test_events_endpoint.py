@@ -73,3 +73,29 @@ def test_health_check(client):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("field", ["level", "logger", "source", "event_type", "event_id"])
+def test_ingest_event_rejects_an_empty_identifier_field(client, field):
+    event = dict(_VALID_EVENT, **{field: ""})
+
+    response = client.post("/events", json=event)
+
+    assert response.status_code == 422
+
+
+def test_ingest_event_rejects_an_unknown_log_level(client):
+    event = dict(_VALID_EVENT, level="BANANA")
+
+    response = client.post("/events", json=event)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+def test_ingest_event_accepts_every_real_log_level(client, level):
+    event = dict(_VALID_EVENT, event_id=f"level-check-{level}", level=level)
+
+    response = client.post("/events", json=event)
+
+    assert response.status_code == 201
