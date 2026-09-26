@@ -174,6 +174,43 @@ def test_unrelated_scenario_types_never_form_a_composite_incident():
     assert incidents[0].pattern == "same-source-burst"
 
 
+# ---- Malformed data: an ERROR-status event is not a real attack signal ----
+
+
+def test_an_error_status_event_is_never_part_of_a_composite_incident():
+
+    events = [
+        _event("dep", "attack-sim", "attack_scenario_run", 0, scenario="malicious-dependency", status="failure"),
+        _event("sec", "attack-sim", "attack_scenario_run", 50, scenario="leaked-secret", status="error"),
+    ]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_an_error_status_event_is_never_part_of_a_same_source_burst():
+    events = [
+        _event("e1", "attack-sim", "attack_scenario_run", 0, status="failure"),
+        _event("e2", "attack-sim", "attack_scenario_run", 10, status="error"),
+    ]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_two_error_status_events_form_no_incident_at_all():
+    events = [
+        _event("e1", "attack-sim", "attack_scenario_run", 0, status="error"),
+        _event("e2", "attack-sim", "attack_scenario_run", 10, status="error"),
+    ]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
 # ---- run_correlation(): wired to a real database ---------------------------
 
 

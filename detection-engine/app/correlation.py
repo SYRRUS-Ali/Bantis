@@ -23,6 +23,10 @@ def _is_success(event: EventORM) -> bool:
     return (event.details or {}).get("status") == "success"
 
 
+def _is_error(event: EventORM) -> bool:
+    return (event.details or {}).get("status") == "error"
+
+
 def _mitre_technique(event: EventORM) -> str:
     return (event.details or {}).get("mitre_technique", "N/A")
 
@@ -128,6 +132,7 @@ def _find_composite_incidents(events: list[EventORM], claimed: set[str]) -> list
 
 
 def correlate(events: list[EventORM]) -> list[IncidentORM]:
+    events = [e for e in events if not _is_error(e)]
     events = sorted(events, key=lambda e: e.timestamp)
     claimed: set[str] = set()
 
