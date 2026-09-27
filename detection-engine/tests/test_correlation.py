@@ -24,6 +24,22 @@ def _event(event_id, source, event_type, seconds_after_t0=0, scenario=None, stat
     )
 
 
+def _image_pull_event(event_id, seconds_after_t0=0, registry="docker.io", image="library/python:3.12-slim"):
+    details = {"image": image}
+    if registry is not None:
+        details["registry"] = registry
+    return EventORM(
+        event_id=event_id,
+        timestamp=_T0 + timedelta(seconds=seconds_after_t0),
+        level="INFO",
+        logger="ci",
+        source="ci",
+        event_type="container_image_pull",
+        message="test event",
+        details=details,
+    )
+
+
 # ---- Pattern 1: same-source burst -----------------------------------------
 
 
@@ -172,6 +188,74 @@ def test_unrelated_scenario_types_never_form_a_composite_incident():
 
     assert len(incidents) == 1
     assert incidents[0].pattern == "same-source-burst"
+
+
+# ---- Pattern 3: untrusted registry pull ------------------------------------
+
+
+def test_a_pull_from_an_untrusted_registry_forms_its_own_incident():
+    events = [_image_pull_event("pull1", registry="evil-registry.example.com")]
+
+    incidents = correlate(events)
+
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.pattern == "untrusted-registry-pull"
+    assert incident.window_seconds == 0
+    assert incident.correlated_event_ids == ["pull1"]
+    assert incident.severity == "high"
+    assert incident.confidence == 0.7
+
+
+def test_a_pull_from_a_trusted_registry_forms_no_incident():
+    events = [_image_pull_event("pull1", registry="docker.io")]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_a_pull_from_the_other_trusted_registry_forms_no_incident():
+    events = [_image_pull_event("pull1", registry="ghcr.io")]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_a_pull_with_no_registry_field_is_treated_as_untrusted():
+    events = [_image_pull_event("pull1", registry=None)]
+
+    incidents = correlate(events)
+
+    assert len(incidents) == 1
+    assert incidents[0].pattern == "untrusted-registry-pull"
+
+
+def test_two_untrusted_registry_pulls_form_two_separate_incidents():
+    events = [
+        _image_pull_event("pull1", 0, registry="evil-registry.example.com"),
+        _image_pull_event("pull2", 10, registry="another-bad-registry.example.com"),
+    ]
+
+    incidents = correlate(events)
+
+    assert len(incidents) == 2
+    assert {incident.pattern for incident in incidents} == {"untrusted-registry-pull"}
+    assert {tuple(incident.correlated_event_ids) for incident in incidents} == {("pull1",), ("pull2",)}
+
+
+def test_an_untrusted_registry_pull_is_not_also_reported_as_a_same_source_burst():
+    events = [
+        _image_pull_event("pull1", 0, registry="evil-registry.example.com"),
+        _event("e2", "ci", "attack_scenario_run", 10),
+    ]
+
+    incidents = correlate(events)
+
+    assert len(incidents) == 1
+    assert incidents[0].pattern == "untrusted-registry-pull"
+    assert incidents[0].correlated_event_ids == ["pull1"]
 
 
 # ---- Malformed data: an ERROR-status event is not a real attack signal ----
