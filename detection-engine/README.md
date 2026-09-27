@@ -34,12 +34,21 @@ detection-engine/
 ## Status
 
 Ingestion, plus correlation as a callable function. `app/correlation.py`
-implements both patterns from
+implements all three patterns from
 [`docs/correlation-design.md`](../docs/correlation-design.md) —
 `correlate(events)` is the pure grouping logic (fed a list of `EventORM`,
 returns `IncidentORM` instances, no database involved); `run_correlation(session)`
 wires it to real stored data: loads every event not already claimed by a
 past incident, correlates them, and persists any new incidents.
+
+Pattern 3 (untrusted registry pull) is single-event, not a time-windowed
+grouping like the other two: a `container_image_pull` event is flagged
+immediately if its `registry` isn't in the `TRUSTED_REGISTRIES`
+whitelist (currently `docker.io` and `ghcr.io`). It runs before Pattern 1
+in `correlate()` so its event is claimed and never also swept into a
+generic same-source burst. No producer emits `container_image_pull` yet
+— the rule is defined and tested ahead of that, same staged approach the
+rest of M3 has followed throughout.
 
 **Nothing calls `run_correlation()` automatically yet** — no scheduler,
 no endpoint triggers it on ingestion. It's a function ready to be wired
@@ -146,6 +155,19 @@ reporting a "high severity" incident that was only half real. **Fix:**
 either pattern in `docs/correlation-design.md` ever sees it. Verified
 with both synthetic regression tests (`tests/test_correlation.py`) and
 the real end-to-end scenario run.
+
+**Adding Pattern 3 conflicted with the documented `correlated_event_ids`
+invariant.** Found on 2026-09-27 while writing the untrusted-registry-pull
+rule: `docs/correlation-design.md` documented `correlated_event_ids` as
+"always ≥ 2" for every incident, which is only true for Patterns 1 and 2
+— Pattern 3 is single-event by design, since one pull from outside the
+whitelist is already the complete signal, not partial evidence awaiting
+a second event. **Fix:** the doc's field table now calls out Pattern 3 as
+the one exception, and `correlate()` runs Pattern 3 before Pattern 1 so
+an untrusted pull's event is claimed and never *also* reported as a
+vague same-source burst — verified by deliberately reordering them and
+confirming `tests/test_correlation.py`'s ordering test fails, then
+restoring the correct order.
 
 ## Running the tests
 
