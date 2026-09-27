@@ -45,6 +45,18 @@ A package with a name similar to a legitimate one is installed by mistake.
 | Compromised CI step | T1195.002 | Initial Access |
 | Typosquatted package | T1195.001 | Initial Access |
 
+## Detection-engine-only rule — Untrusted Registry Pull
+Not an attack-sim scenario (no `attack-sim` code produces this event) —
+a Detection Engine correlation rule over a `container_image_pull` event
+(`docs/event-schema.md`), covering the fourth attacker capability listed
+in `docs/threat-model.md`: causing an unverified/untrusted image to be
+pulled during a build.
+
+- **Primary:** T1195.002 — Supply Chain Compromise: Compromise Software
+  Supply Chain *(Initial Access)* — same technique as Compromised CI
+  Step, since an untrusted image pulled into the build is the same
+  build-infrastructure-compromise shape, just a different vector.
+
 ## Notes
 This mapping covers v1 scope (supply chain layer) only. A second mapping
 will be added if/when a network/host attack layer is introduced later.

@@ -106,6 +106,48 @@ guessing at every pairwise combination without evidence any of the
 others are meaningful. Widening it is a v2 problem, made easier
 specifically *because* v1 shipped one pattern that actually works.
 
+## Pattern 3: untrusted registry pull
+
+**Rule.** A single `container_image_pull` event (`source=ci`) whose
+`details.registry` is not in the trusted-registry whitelist below forms
+its own incident immediately — no time window, no second event needed.
+
+**What "untrusted registry" means (v1 whitelist).** A small, explicit
+allow-list of the registries Bantis's own infrastructure actually pulls
+from, grounded in [`docs/range-architecture.md`](range-architecture.md)
+and the ecosystem default:
+
+| Registry | Why it's trusted |
+|---|---|
+| `docker.io` | Docker Hub — the ecosystem default most public base images come from. |
+| `ghcr.io` | GitHub Container Registry — where Bantis's own built image lives (see `range-architecture.md`'s "Docker image (GHCR)"). |
+
+Any `details.registry` value not exactly matching one of these two
+strings is untrusted — a typo'd host, a private/unknown registry, a bare
+IP address, all included on purpose rather than trying to build real
+registry reputation or verification in v1. A missing `registry` field
+is untrusted too, by the same fail-closed logic: absence of evidence
+that a pull was safe is not evidence that it was. Deliberately a whitelist, not
+a blocklist: a blocklist would need to anticipate every bad registry in
+advance, while a whitelist only needs to know Bantis's own two legitimate
+sources and treats everything else as suspicious by default.
+
+**Why no time window, unlike Patterns 1 and 2.** A single pull from a
+registry outside that list is already the complete signal — per
+[`docs/threat-model.md`](threat-model.md)'s assumed attacker
+capabilities, "causing an unverified/untrusted container image to be
+pulled during a build" is in scope for v1 on its own, not just as
+circumstantial evidence that needs corroborating events. Waiting for a
+second event before reporting it would only delay a signal that's
+already actionable.
+
+**Why this pattern claims its event before Pattern 1 sees it.** Same
+reasoning as Pattern 2's ordering: this is the more specific,
+type-specific rule, so it runs (and claims its event) before the
+generic same-source burst gets a chance to also report it — an
+untrusted pull should never be *also* reported as a vague same-source
+burst just because another `ci` event happened nearby.
+
 ## Incident data shape
 
 ```json
@@ -126,9 +168,9 @@ specifically *because* v1 shipped one pattern that actually works.
 |---|---|---|
 | `incident_id` | string (UUID4) | Same format convention as `event_id` in the envelope. |
 | `created_at` | string (ISO 8601, UTC) | When the correlation engine formed the incident, not when the underlying events occurred. |
-| `pattern` | string | `"same-source-burst"` or `"composite-dependency-secret"` — an enum of exactly the two patterns above; extending it is how a v2 pattern gets added later. |
-| `window_seconds` | int | Whichever constant actually produced this incident — makes the incident self-describing without needing to cross-reference this doc. |
-| `correlated_event_ids` | array of string | The `event_id`s that were grouped — always ≥ 2. The incident references events; it never duplicates their content. |
+| `pattern` | string | `"same-source-burst"`, `"composite-dependency-secret"`, or `"untrusted-registry-pull"` — an enum of exactly the three patterns above; extending it is how a v2 pattern gets added later. |
+| `window_seconds` | int | Whichever constant actually produced this incident, or `0` for Pattern 3 (no window — see above) — makes the incident self-describing without needing to cross-reference this doc. |
+| `correlated_event_ids` | array of string | The `event_id`s that were grouped — always ≥ 2 for Patterns 1 and 2. Pattern 3 is the one exception: exactly 1, since a single untrusted pull is already the complete signal, not partial evidence awaiting a second event. The incident references events; it never duplicates their content. |
 | `mitre_techniques` | array of string | The union of `details.mitre_technique` from every correlated event, in event order, **not deduplicated** — two techniques appearing twice is itself a signal (see confidence below), so collapsing it here would throw that away. |
 | `severity` | enum: `low` \| `medium` \| `high` \| `critical` | See scoring below. |
 | `confidence` | float, `0.0`–`1.0` | Explicitly a v1, rule-based, non-AI estimate — named `confidence` and not `score` on purpose, so M4's own AI-derived value has an obviously distinct field to land in later rather than overwriting this one. |
@@ -158,6 +200,17 @@ on, not a claim that rule-based scoring is sufficient long-term.
   `0.6` / `0.75` / `0.9` depending on 0, 1, or 2 successes) — starts
   meaningfully higher than Pattern 1 because the *type-specific*
   pairing is a much less coincidental signal than shared timing alone.
+
+**Pattern 3 (untrusted registry pull):**
+- `severity = "high"`, fixed — not escalated by a success/failure status
+  the way Patterns 1 and 2 are, because a `container_image_pull` event
+  carries no such field (see event-schema.md): the pull either happened
+  from an untrusted registry or it didn't, there's no partial outcome to
+  weigh.
+- `confidence = 0.7`, fixed — higher than Pattern 1's timing-only signal
+  (a pull from outside the whitelist is a direct, unambiguous match, not
+  circumstantial), but still short of Pattern 2's paired-evidence ceiling
+  and, per the rule below, of `1.0`.
 
 Both scales stop short of `1.0` everywhere in v1: nothing rule-based
 should ever claim total certainty — that ceiling is intentional, not an

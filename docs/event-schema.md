@@ -20,9 +20,11 @@ log line) follows this envelope.
 
 ## Event types (v1)
 
-Two event types are emitted today. More are added as later milestones
-(Attack Simulation, Detection Engine) need them — this list is expected to
-grow, not to be redesigned.
+Two event types are emitted today; a third (`container_image_pull`,
+below) is defined ahead of any producer emitting it yet, same staged
+approach `attack_scenario_run` itself followed (schema first, so the
+correlation rule that needs it has a concrete shape to build against).
+This list is expected to grow, not to be redesigned.
 
 ### `http_request`
 Emitted once per HTTP request, by both `api` and `nginx`.
@@ -78,6 +80,19 @@ omits `tool_returncode`/`tool_output_tail` rather than reporting a
 meaningless value, but still uses `artifact`. Any new scenario should
 reuse these three names for the same concepts instead of inventing new
 ones.
+
+### `container_image_pull`
+Emitted once per container image pulled during a CI build, by `ci`.
+
+`details`:
+| Field      | Type   | Notes                                                              |
+|------------|--------|----------------------------------------------------------------------|
+| `image`    | string | The full image reference as pulled (e.g. `docker.io/library/python:3.12-slim`). |
+| `registry` | string | The image reference's registry host, parsed out separately from `image` so the Detection Engine can match it against a whitelist without re-parsing (see [`docs/correlation-design.md`](correlation-design.md#pattern-3-untrusted-registry-pull)). |
+
+Unlike `attack_scenario_run`, this event type has no `status` field — a
+pull either happened from a given registry or it didn't; there's no
+separate success/failure outcome to report alongside it.
 
 ## Known limitation
 `api` and `nginx` report request duration in different units
