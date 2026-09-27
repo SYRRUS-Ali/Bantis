@@ -14,6 +14,11 @@ COMPOSITE_WINDOW_SECONDS = 300
 _COMPOSITE_DEPENDENCY_SCENARIO = "malicious-dependency"
 _COMPOSITE_SECRET_SCENARIO = "leaked-secret"
 
+_IMAGE_PULL_EVENT_TYPE = "container_image_pull"
+_UNTRUSTED_REGISTRY_MITRE_TECHNIQUE = "T1195.002"
+
+TRUSTED_REGISTRIES = {"docker.io", "ghcr.io"}
+
 
 def _scenario_name(event: EventORM) -> str | None:
     return (event.details or {}).get("scenario")
@@ -25,6 +30,17 @@ def _is_success(event: EventORM) -> bool:
 
 def _is_error(event: EventORM) -> bool:
     return (event.details or {}).get("status") == "error"
+
+
+def _is_image_pull(event: EventORM) -> bool:
+    return event.event_type == _IMAGE_PULL_EVENT_TYPE
+
+
+def _is_untrusted_registry_pull(event: EventORM) -> bool:
+    if not _is_image_pull(event):
+        return False
+    registry = (event.details or {}).get("registry")
+    return registry not in TRUSTED_REGISTRIES
 
 
 def _mitre_technique(event: EventORM) -> str:
@@ -107,6 +123,35 @@ def _build_composite_incident(dependency: EventORM, secret: EventORM) -> Inciden
     )
 
 
+def _build_untrusted_registry_incident(event: EventORM) -> IncidentORM:
+    registry = (event.details or {}).get("registry", "unknown")
+    image = (event.details or {}).get("image", "unknown")
+
+    return IncidentORM(
+        incident_id=str(uuid.uuid4()),
+        created_at=datetime.now(timezone.utc),
+        pattern="untrusted-registry-pull",
+        window_seconds=0,
+        correlated_event_ids=[event.event_id],
+        mitre_techniques=[_UNTRUSTED_REGISTRY_MITRE_TECHNIQUE],
+        severity="high",
+        confidence=0.7,
+        summary=f"image pulled from untrusted registry {registry!r}: {image}",
+    )
+
+
+def _find_untrusted_registry_incidents(events: list[EventORM], claimed: set[str]) -> list[IncidentORM]:
+    incidents: list[IncidentORM] = []
+    for event in events:
+        if event.event_id in claimed:
+            continue
+        if _is_untrusted_registry_pull(event):
+            incidents.append(_build_untrusted_registry_incident(event))
+            claimed.add(event.event_id)
+
+    return incidents
+
+
 def _find_composite_incidents(events: list[EventORM], claimed: set[str]) -> list[IncidentORM]:
     incidents: list[IncidentORM] = []
     dependency_events = [
@@ -138,6 +183,7 @@ def correlate(events: list[EventORM]) -> list[IncidentORM]:
 
     incidents: list[IncidentORM] = []
     incidents.extend(_find_composite_incidents(events, claimed))
+    incidents.extend(_find_untrusted_registry_incidents(events, claimed))
     incidents.extend(_find_same_source_incidents(events, claimed))
     return incidents
 
