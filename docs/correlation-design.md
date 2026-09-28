@@ -186,20 +186,14 @@ on, not a claim that rule-based scoring is sufficient long-term.
 - `severity = "medium"` by default; escalate to `"high"` if **any**
   correlated event has `details.status == "success"` (an attack that
   actually got through is more concerning than two defended attempts).
-- `confidence = 0.3`, `+0.2` if escalated to `"high"` above (`0.5` cap in
-  v1) — timing-and-source alone is a weak signal on purpose: legitimate
-  repeated activity (an operator re-running a scenario after a fix) is
-  common enough that this pattern is expected to be noisy, and the
-  confidence value should say so honestly rather than overclaiming.
+- `confidence`: see the formula below — `0.3` / `0.5`.
 
 **Pattern 2 (composite dependency+secret):**
 - `severity = "high"` by default; escalate to `"critical"` if **both**
   correlated events have `details.status == "success"` (both halves of
   the composite attack landed, not just one).
-- `confidence = 0.6`, `+0.15` per event with `status == "success"` (so
-  `0.6` / `0.75` / `0.9` depending on 0, 1, or 2 successes) — starts
-  meaningfully higher than Pattern 1 because the *type-specific*
-  pairing is a much less coincidental signal than shared timing alone.
+- `confidence`: see the formula below — `0.6` / `0.75` / `0.9` depending
+  on 0, 1, or 2 successes.
 
 **Pattern 3 (untrusted registry pull):**
 - `severity = "high"`, fixed — not escalated by a success/failure status
@@ -207,10 +201,44 @@ on, not a claim that rule-based scoring is sufficient long-term.
   carries no such field (see event-schema.md): the pull either happened
   from an untrusted registry or it didn't, there's no partial outcome to
   weigh.
-- `confidence = 0.7`, fixed — higher than Pattern 1's timing-only signal
-  (a pull from outside the whitelist is a direct, unambiguous match, not
-  circumstantial), but still short of Pattern 2's paired-evidence ceiling
-  and, per the rule below, of `1.0`.
+- `confidence`: see the formula below — `0.7`, fixed.
+
+#### Confidence score formula (v1)
+
+Every pattern computes its `confidence` through the same formula
+(`_confidence()` in `app/correlation.py`), instead of three independent,
+hand-rolled calculations that happen to look similar:
+
+```
+confidence = round(base + per_success_bonus × min(successes, max_counted_successes), 2)
+```
+
+| Constant | Pattern 1 | Pattern 2 | Pattern 3 |
+|---|---|---|---|
+| `base` | `0.3` | `0.6` | `0.7` |
+| `per_success_bonus` | `0.2` | `0.15` | `0.0` |
+| `max_counted_successes` | `1` | `2` | `0` |
+| Resulting range | `0.3` – `0.5` | `0.6` – `0.9` | `0.7` (fixed) |
+
+- **`base`** is the pattern's own specificity, independent of outcome —
+  timing-and-source alone (Pattern 1) is the weakest signal on purpose
+  (legitimate repeated activity, like an operator re-running a scenario
+  after a fix, is common enough that this pattern is expected to be
+  noisy); a type-specific pairing (Pattern 2) starts meaningfully higher;
+  a direct untrusted-registry match (Pattern 3) sits between Pattern 2's
+  own low and high ends — unambiguous, but uncorroborated by a second
+  event the way Pattern 2's pairing is.
+- **`per_success_bonus × successes`** rewards an attack that actually
+  landed over one that was attempted and defended.
+- **`max_counted_successes`** caps how many of a pattern's own events can
+  ever contribute a bonus. For Pattern 2 this is just its natural pair
+  size (2) — the cap and the pattern's actual event count happen to
+  coincide. For Pattern 1 it's a *deliberate* cap below the group's
+  actual size: a same-source burst can have more than 2 events, and
+  without this cap a burst with several successes would silently exceed
+  the `0.5` ceiling this table promises. Pattern 3 has no status field to
+  ever earn a bonus from, so it's the formula's degenerate case — `base`
+  alone, unconditionally.
 
 Both scales stop short of `1.0` everywhere in v1: nothing rule-based
 should ever claim total certainty — that ceiling is intentional, not an

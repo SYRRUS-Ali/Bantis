@@ -50,6 +50,15 @@ generic same-source burst. No producer emits `container_image_pull` yet
 — the rule is defined and tested ahead of that, same staged approach the
 rest of M3 has followed throughout.
 
+**Confidence scoring goes through one shared formula.** `_confidence()`
+computes every pattern's `confidence` as `base + per_success_bonus ×
+min(successes, max_counted_successes)`, with per-pattern constants
+instead of three separate hand-rolled calculations — see
+[`docs/correlation-design.md`](../docs/correlation-design.md#confidence-score-formula-v1)
+for the constants table and the reasoning behind each one, including why
+Pattern 1's success bonus is capped at 1 event even though its burst can
+contain more than that.
+
 **Nothing calls `run_correlation()` automatically yet** — no scheduler,
 no endpoint triggers it on ingestion. It's a function ready to be wired
 in, same staged approach as every other piece of M3 so far (the
@@ -168,6 +177,35 @@ an untrusted pull's event is claimed and never *also* reported as a
 vague same-source burst — verified by deliberately reordering them and
 confirming `tests/test_correlation.py`'s ordering test fails, then
 restoring the correct order.
+
+**The persistence test only ever compared an object to itself.** Found
+on 2026-09-28 while confirming every incident field is genuinely stored:
+`test_run_correlation_persists_new_incidents` queried
+`IncidentORM` on the *same* session `run_correlation()` had just used —
+SQLAlchemy's identity map returns the same Python object for a given
+primary key within one session, so the assertion was comparing an
+object to itself, not to a row actually read back from the database.
+Proven by deliberately removing `session.commit()` from
+`run_correlation()`: the old test still passed (a query on the same
+session sees its own uncommitted pending writes), while nothing had
+actually reached SQLite. **Fix:** added
+`test_run_correlation_stores_every_incident_field_completely`, which
+opens a *separate* `Session` on the same engine and compares every
+column against the incident `correlate()` built — this one genuinely
+fails without the commit.
+
+**The confidence formula was three independent, hand-rolled
+calculations that happened to look similar.** Unified into one
+`_confidence()` function (`base + per_success_bonus × min(successes,
+max_counted_successes)`) shared by all three patterns — see
+[`docs/correlation-design.md`](../docs/correlation-design.md#confidence-score-formula-v1).
+Calibration check while unifying: a naive generalization of Pattern 2's
+"bonus per successful event" to Pattern 1 (whose burst can have more
+than 2 events) would silently let confidence exceed the documented
+`0.5` cap for that pattern once more than one event in a larger burst
+succeeded. `max_counted_successes` exists specifically to prevent that;
+`test_same_source_confidence_stays_capped_with_more_than_one_success_in_a_larger_burst`
+proves it holds, and fails without the cap.
 
 ## Running the tests
 
