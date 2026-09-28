@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy.orm import Session
 
 from app.correlation import COMPOSITE_WINDOW_SECONDS, SAME_SOURCE_WINDOW_SECONDS, correlate, run_correlation
 from app.event_models import EventORM
@@ -105,6 +106,19 @@ def test_same_source_incident_escalates_severity_and_confidence_on_success():
     assert failed_incident.confidence == 0.3
     assert success_incident.severity == "high"
     assert success_incident.confidence == 0.5
+
+
+def test_same_source_confidence_stays_capped_with_more_than_one_success_in_a_larger_burst():
+    events = [
+        _event("e1", "attack-sim", "attack_scenario_run", 0, status="success"),
+        _event("e2", "attack-sim", "attack_scenario_run", 10, status="success"),
+        _event("e3", "attack-sim", "attack_scenario_run", 20, status="failure"),
+    ]
+
+    incident = correlate(events)[0]
+
+    assert incident.severity == "high"
+    assert incident.confidence == 0.5
 
 
 def test_mitre_techniques_are_not_deduplicated():
@@ -325,6 +339,36 @@ def test_run_correlation_persists_new_incidents(db_session):
     stored = db_session.query(IncidentORM).all()
     assert len(stored) == 1
     assert stored[0].incident_id == incidents[0].incident_id
+
+
+def test_run_correlation_stores_every_incident_field_completely(db_session):
+    db_session.add(
+        _event("dep", "attack-sim", "attack_scenario_run", 0, scenario="malicious-dependency", status="success")
+    )
+    db_session.add(
+        _event("sec", "attack-sim", "attack_scenario_run", 50, scenario="leaked-secret", status="success")
+    )
+    db_session.commit()
+
+    incidents = run_correlation(db_session)
+    assert len(incidents) == 1
+    created = incidents[0]
+
+    from app.db import engine
+    from app.incident_models import IncidentORM
+
+    with Session(engine) as fresh_session:
+        stored = fresh_session.get(IncidentORM, created.incident_id)
+
+        assert stored is not None
+        assert stored.pattern == created.pattern == "composite-dependency-secret"
+        assert stored.window_seconds == created.window_seconds == COMPOSITE_WINDOW_SECONDS
+        assert stored.correlated_event_ids == created.correlated_event_ids == ["dep", "sec"]
+        assert stored.mitre_techniques == created.mitre_techniques
+        assert stored.severity == created.severity == "critical"
+        assert stored.confidence == created.confidence == 0.9
+        assert stored.summary == created.summary
+        assert stored.created_at is not None
 
 
 def test_run_correlation_does_not_reprocess_already_correlated_events(db_session):
