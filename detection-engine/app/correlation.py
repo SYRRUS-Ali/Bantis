@@ -47,6 +47,15 @@ def _mitre_technique(event: EventORM) -> str:
     return (event.details or {}).get("mitre_technique", "N/A")
 
 
+def _count_successes(events: list[EventORM]) -> int:
+    return sum(1 for e in events if _is_success(e))
+
+
+def _confidence(base: float, per_success_bonus: float, successes: int, max_counted_successes: int) -> float:
+    counted = min(successes, max_counted_successes)
+    return round(base + per_success_bonus * counted, 2)
+
+
 def _cluster_by_gap(events: list[EventORM], window_seconds: int) -> list[list[EventORM]]:
     if not events:
         return []
@@ -62,9 +71,9 @@ def _cluster_by_gap(events: list[EventORM], window_seconds: int) -> list[list[Ev
 
 
 def _build_same_source_incident(group: list[EventORM]) -> IncidentORM:
-    any_success = any(_is_success(e) for e in group)
-    severity = "high" if any_success else "medium"
-    confidence = 0.5 if any_success else 0.3
+    successes = _count_successes(group)
+    severity = "high" if successes > 0 else "medium"
+    confidence = _confidence(base=0.3, per_success_bonus=0.2, successes=successes, max_counted_successes=1)
 
     parts = [f"{_scenario_name(e) or e.event_type} ({e.details.get('status', e.level.lower())})" for e in group]
     summary = f"{len(group)} {group[0].source} events within {SAME_SOURCE_WINDOW_SECONDS}s: " + ", ".join(parts)
@@ -103,9 +112,9 @@ def _find_same_source_incidents(events: list[EventORM], claimed: set[str]) -> li
 
 def _build_composite_incident(dependency: EventORM, secret: EventORM) -> IncidentORM:
     pair = sorted([dependency, secret], key=lambda e: e.timestamp)
-    successes = sum(1 for e in pair if _is_success(e))
+    successes = _count_successes(pair)
     severity = "critical" if successes == 2 else "high"
-    confidence = round(0.6 + 0.15 * successes, 2)
+    confidence = _confidence(base=0.6, per_success_bonus=0.15, successes=successes, max_counted_successes=2)
 
     return IncidentORM(
         incident_id=str(uuid.uuid4()),
@@ -135,7 +144,7 @@ def _build_untrusted_registry_incident(event: EventORM) -> IncidentORM:
         correlated_event_ids=[event.event_id],
         mitre_techniques=[_UNTRUSTED_REGISTRY_MITRE_TECHNIQUE],
         severity="high",
-        confidence=0.7,
+        confidence=_confidence(base=0.7, per_success_bonus=0.0, successes=0, max_counted_successes=0),
         summary=f"image pulled from untrusted registry {registry!r}: {image}",
     )
 
