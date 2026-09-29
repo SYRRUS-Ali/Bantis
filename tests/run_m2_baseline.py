@@ -18,6 +18,7 @@ _PORT = 18767
 _DETECTION_ENGINE_URL = f"http://127.0.0.1:{_PORT}"
 
 _SCENARIO_IDS = ["malicious-dependency", "leaked-secret", "compromised-ci-step", "typosquatting"]
+_EXPECTED_PATTERNS = ["composite-dependency-secret", "same-source-burst"]
 
 _SAMPLE_WORKFLOW = """\
 name: Range CI/CD Pipeline
@@ -126,6 +127,7 @@ def main() -> int:
 
         from sqlalchemy.orm import Session
 
+        from app.correlation import run_correlation
         from app.event_models import EventORM
 
         with Session(engine) as session:
@@ -136,6 +138,17 @@ def main() -> int:
             missing = set(_SCENARIO_IDS) - reported_scenarios
             if missing:
                 failures.append(f"no event reached the detection-engine for: {sorted(missing)}")
+
+            incidents = run_correlation(session)
+
+            print(f"\n{len(incidents)} incident(s) formed:")
+            for incident in incidents:
+                print(f"  - {incident.pattern} (severity={incident.severity}, confidence={incident.confidence})")
+                print(f"    {incident.summary}")
+
+            patterns = sorted(incident.pattern for incident in incidents)
+            if patterns != _EXPECTED_PATTERNS:
+                failures.append(f"expected incidents {_EXPECTED_PATTERNS}, got {patterns}")
 
     finally:
         if real_subprocess_run is not None:
@@ -152,7 +165,10 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
 
-    print("M2 BASELINE PASSED: all four scenarios reached the detection-engine.")
+    print(
+        "M2 BASELINE PASSED: all four scenarios reached the detection-engine "
+        "and both existing correlation rules fired as documented."
+    )
     return 0
 
 
