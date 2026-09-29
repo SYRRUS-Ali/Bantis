@@ -104,11 +104,12 @@ def _run_all_scenarios(tmp_dir: Path) -> dict:
 
 def main() -> int:
     tmp_dir = Path(tempfile.mkdtemp(prefix="bantis-m2-baseline-"))
+    failures: list[str] = []
 
     os.environ["BANTIS_ENV"] = "range-local"
     os.environ["DETECTION_ENGINE_URL"] = _DETECTION_ENGINE_URL
 
-    server = thread = None
+    server = thread = engine = None
     real_subprocess_run = None
     try:
         print("Starting a live detection-engine...")
@@ -123,6 +124,19 @@ def main() -> int:
         print(f"\nRunning {len(_SCENARIO_IDS)} M2 scenarios in sequence:")
         _run_all_scenarios(tmp_dir)
 
+        from sqlalchemy.orm import Session
+
+        from app.event_models import EventORM
+
+        with Session(engine) as session:
+            stored_events = session.query(EventORM).filter_by(source="attack-sim").all()
+            print(f"\n{len(stored_events)}/{len(_SCENARIO_IDS)} scenario events reached the detection-engine")
+
+            reported_scenarios = {e.details.get("scenario") for e in stored_events}
+            missing = set(_SCENARIO_IDS) - reported_scenarios
+            if missing:
+                failures.append(f"no event reached the detection-engine for: {sorted(missing)}")
+
     finally:
         if real_subprocess_run is not None:
             subprocess.run = real_subprocess_run
@@ -131,6 +145,14 @@ def main() -> int:
             thread.join(timeout=5)
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    print("\n" + "=" * 72)
+    if failures:
+        print(f"M2 BASELINE FAILED ({len(failures)} issue(s)):")
+        for failure in failures:
+            print(f"  - {failure}")
+        return 1
+
+    print("M2 BASELINE PASSED: all four scenarios reached the detection-engine.")
     return 0
 
 
