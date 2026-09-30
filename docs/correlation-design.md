@@ -69,8 +69,9 @@ attacker who's gained the ability to trigger scenarios) runs
 `malicious-dependency` and then, 40 seconds later, `typosquatting` — two
 independent supply-chain attempts from the same actor in quick
 succession is a meaningfully different situation than either alone,
-regardless of which two scenario types they are. This pattern is
-intentionally **type-agnostic** — it doesn't care *which* two events, only
+regardless of which two scenario types they are. Among the event types
+it considers (see scope below), this pattern is intentionally
+**type-agnostic** — it doesn't care *which* two eligible events, only
 that the same source produced two of them close together. Pattern 2
 below is the type-*specific* complement to this.
 
@@ -80,6 +81,27 @@ change and no cross-scenario knowledge — just grouping by `source` and
 equivalent of `noop.py`: the simplest possible rule, built first so the
 storage and incident-emission plumbing has something concrete to prove
 itself against before a more specific rule is layered on.
+
+### Pattern 1 scope: which event types are eligible
+
+`http_request` events are excluded from Pattern 1 entirely
+(`_SAME_SOURCE_EXCLUDED_EVENT_TYPES` in `app/correlation.py`) — found via
+the labeled evaluation in
+[`detection-engine/tests/evaluate_correlation_rules.py`](../detection-engine/tests/evaluate_correlation_rules.py)
+and recorded in
+[`docs/detection-rate-baseline.md`](detection-rate-baseline.md): three
+completely ordinary, successful `/health` requests from the same `api`
+process, seconds apart, formed a `"medium"` severity incident under the
+rule as originally written. `http_request` is continuous per-request
+telemetry, not a discrete attacker-relevant action, and volume/traffic
+based network-layer detection is explicitly out of scope for v1
+([`docs/threat-model.md`](threat-model.md)) — so treating every pair of
+ordinary requests within `SAME_SOURCE_WINDOW_SECONDS` as a security
+incident was never an intended reading of "type-agnostic," just an
+unconsidered one. `attack_scenario_run` and `container_image_pull` stay
+eligible; the exclusion is a deny-list of exactly the one event type
+proven to be pure noise here, not an allow-list guessing at every future
+telemetry-only type in advance.
 
 ## Pattern 2: composite dependency+secret
 

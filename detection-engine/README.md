@@ -207,6 +207,21 @@ succeeded. `max_counted_successes` exists specifically to prevent that;
 `test_same_source_confidence_stays_capped_with_more_than_one_success_in_a_larger_burst`
 proves it holds, and fails without the cap.
 
+**Ordinary API/nginx traffic was a 25% false-positive rate.** Found on
+2026-09-30 by a labeled true-positive/true-negative evaluation
+(`tests/evaluate_correlation_rules.py`) built specifically to put a
+number on detection rate and false positives, rather than trusting that
+the existing hand-picked unit tests were representative. Three plain,
+successful `/health` requests to `api`, seconds apart, formed a
+`"medium"` severity `same-source-burst` incident — Pattern 1 is
+type-agnostic by design, but nothing had ever scoped which event types
+it should even consider, so ordinary per-request telemetry got treated
+like a discrete attacker action. **Fix:** `_SAME_SOURCE_EXCLUDED_EVENT_TYPES
+= {"http_request"}` excludes it from Pattern 1 entirely — see
+[`docs/detection-rate-baseline.md`](../docs/detection-rate-baseline.md)
+for the full before/after numbers (25.0% → 0.0% false positive rate,
+100.0% detection rate unchanged).
+
 ## Running the tests
 
 ```bash
@@ -222,3 +237,11 @@ test to guarantee isolation even though the underlying engine object is
 cached and shared across the whole test run (a Python module-import
 quirk, not a design choice — see the comment at the top of
 `tests/test_events_endpoint.py`).
+
+`tests/evaluate_correlation_rules.py` is not a pytest file (no `test_`
+prefix, so `pytest tests -v` above skips it) — a standalone script that
+runs a labeled true-positive/true-negative case battery and prints the
+detection-rate and false-positive numbers directly, without needing a
+database or live server. See
+[`docs/detection-rate-baseline.md`](../docs/detection-rate-baseline.md)
+for the recorded baseline and how to reproduce it.
