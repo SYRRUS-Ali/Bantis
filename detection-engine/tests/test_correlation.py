@@ -41,6 +41,19 @@ def _image_pull_event(event_id, seconds_after_t0=0, registry="docker.io", image=
     )
 
 
+def _http_event(event_id, source, seconds_after_t0=0, status_code=200):
+    return EventORM(
+        event_id=event_id,
+        timestamp=_T0 + timedelta(seconds=seconds_after_t0),
+        level="INFO",
+        logger=f"{source}.access",
+        source=source,
+        event_type="http_request",
+        message="request handled",
+        details={"method": "GET", "path": "/health", "status_code": status_code},
+    )
+
+
 # ---- Pattern 1: same-source burst -----------------------------------------
 
 
@@ -130,6 +143,44 @@ def test_mitre_techniques_are_not_deduplicated():
     incident = correlate(events)[0]
 
     assert incident.mitre_techniques == ["T1195.001", "T1195.001"]
+
+
+# ---- False positives: ordinary traffic is not a same-source burst ----------
+
+
+def test_ordinary_api_traffic_bursts_never_form_a_same_source_incident():
+    events = [
+        _http_event("r1", "api", 0),
+        _http_event("r2", "api", 5),
+        _http_event("r3", "api", 10),
+    ]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_ordinary_nginx_traffic_bursts_never_form_a_same_source_incident():
+    events = [
+        _http_event("r1", "nginx", 0),
+        _http_event("r2", "nginx", 5),
+    ]
+
+    incidents = correlate(events)
+
+    assert incidents == []
+
+
+def test_attack_scenario_bursts_still_form_incidents_after_excluding_http_request():
+    events = [
+        _event("e1", "attack-sim", "attack_scenario_run", 0),
+        _event("e2", "attack-sim", "attack_scenario_run", 10),
+    ]
+
+    incidents = correlate(events)
+
+    assert len(incidents) == 1
+    assert incidents[0].pattern == "same-source-burst"
 
 
 # ---- Pattern 2: composite dependency+secret --------------------------------

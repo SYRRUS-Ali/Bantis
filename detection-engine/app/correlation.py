@@ -19,6 +19,8 @@ _UNTRUSTED_REGISTRY_MITRE_TECHNIQUE = "T1195.002"
 
 TRUSTED_REGISTRIES = {"docker.io", "ghcr.io"}
 
+_SAME_SOURCE_EXCLUDED_EVENT_TYPES = {"http_request"}
+
 
 def _scenario_name(event: EventORM) -> str | None:
     return (event.details or {}).get("scenario")
@@ -96,6 +98,8 @@ def _find_same_source_incidents(events: list[EventORM], claimed: set[str]) -> li
     by_source: dict[str, list[EventORM]] = {}
     for event in events:
         if event.event_id in claimed:
+            continue
+        if event.event_type in _SAME_SOURCE_EXCLUDED_EVENT_TYPES:
             continue
         by_source.setdefault(event.source, []).append(event)
 
