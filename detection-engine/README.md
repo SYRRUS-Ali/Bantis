@@ -19,14 +19,17 @@ detection-engine/
 │   ├── db.py                # SQLAlchemy engine/session, Base, init_db()
 │   ├── event_models.py       # EventORM table definition
 │   ├── incident_models.py    # IncidentORM table definition
-│   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's two patterns
+│   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's three patterns
+│   ├── scorecard.py            # generate_scorecard() — detection rate, false positives, MTTD
 │   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut)
 │   └── routers/
 │       └── events.py            # POST /events — the ingestion endpoint
 ├── tests/
 │   ├── test_events_endpoint.py
 │   ├── test_correlation.py
+│   ├── test_scorecard.py
 │   ├── test_init_db.py
+│   ├── evaluate_correlation_rules.py  # standalone script, not pytest — see docs/detection-rate-baseline.md
 │   └── requirements.txt
 └── requirements.txt
 ```
@@ -58,6 +61,21 @@ instead of three separate hand-rolled calculations — see
 for the constants table and the reasoning behind each one, including why
 Pattern 1's success bonus is capped at 1 event even though its burst can
 contain more than that.
+
+**`app/scorecard.py` turns a run's events and incidents into the three
+numbers `docs/threat-model.md` names as what "success" looks like:**
+detection rate, false positives, and MTTD (mean time to detect).
+`generate_scorecard(events, incidents, expected_patterns)` needs a known
+set of expected incident patterns to score detection rate and false
+positives against — those two numbers aren't well-defined without first
+knowing what should have happened, the same ground truth
+`tests/evaluate_correlation_rules.py` and `tests/run_m2_baseline.py`
+already rely on. MTTD needs no such ground truth: it's the gap between
+each incident's earliest correlated event and the moment
+`run_correlation()` actually formed it, averaged across the run.
+`tests/run_m2_baseline.py` prints a scorecard after every real run — see
+[`docs/m2-detection-baseline.md`](../docs/m2-detection-baseline.md) for
+recorded numbers.
 
 **Nothing calls `run_correlation()` automatically yet** — no scheduler,
 no endpoint triggers it on ingestion. It's a function ready to be wired

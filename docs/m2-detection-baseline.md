@@ -61,6 +61,31 @@ pairing to `"high"` severity via the same-source-burst rule precisely
 because both attempts landed. No scenario or correlation-rule fix was
 needed to reach this result — this run passed on the first attempt.
 
+## Update: 2026-10-01 — scorecard added
+
+`tests/run_m2_baseline.py` now scores every run through
+[`detection-engine/app/scorecard.py`](../detection-engine/app/scorecard.py)
+(`generate_scorecard()`) instead of a hand-rolled pattern comparison,
+adding **MTTD** (mean time to detect) alongside detection rate and false
+positives. Three consecutive runs:
+
+| Run | Detection rate | False positives | MTTD |
+|---|---|---|---|
+| 1 | 2/2 = 100.0% | 0/2 = 0.0% | 1.87s |
+| 2 | 2/2 = 100.0% | 0/2 = 0.0% | 1.53s |
+| 3 | 2/2 = 100.0% | 0/2 = 0.0% | 1.55s |
+
+Detection rate and false positives are exactly as stable as the
+2026-09-29 baseline above (same underlying rules, same expected
+patterns). MTTD varies run to run — it's a measurement of real wall-clock
+time between the earliest correlated event's timestamp and the moment
+`run_correlation()` forms the incident, in this script dominated by how
+long the real `pip install` in `typosquatting` and the real `git`/scratch
+I/O in `leaked-secret` take on the machine running it, not by anything
+the correlation engine itself controls. ~1.5–2s is this machine's
+baseline; a regression worth investigating looks like a large, sustained
+jump, not minor run-to-run variance.
+
 ## What would fail this baseline
 
 `tests/run_m2_baseline.py` exits non-zero (and prints exactly which
@@ -71,3 +96,5 @@ check failed) if any of:
   two missing; or a same-source-burst that also swallows the composite
   pair because ordering broke — see
   [`docs/correlation-design.md`](correlation-design.md)'s claiming rules).
+- The scorecard's detection rate drops below 100% or its false-positive
+  count rises above 0.
