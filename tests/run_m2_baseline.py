@@ -129,6 +129,7 @@ def main() -> int:
 
         from app.correlation import run_correlation
         from app.event_models import EventORM
+        from app.scorecard import generate_scorecard
 
         with Session(engine) as session:
             stored_events = session.query(EventORM).filter_by(source="attack-sim").all()
@@ -146,9 +147,18 @@ def main() -> int:
                 print(f"  - {incident.pattern} (severity={incident.severity}, confidence={incident.confidence})")
                 print(f"    {incident.summary}")
 
-            patterns = sorted(incident.pattern for incident in incidents)
-            if patterns != _EXPECTED_PATTERNS:
-                failures.append(f"expected incidents {_EXPECTED_PATTERNS}, got {patterns}")
+            scorecard = generate_scorecard(stored_events, incidents, expected_patterns=_EXPECTED_PATTERNS)
+            print("\n" + scorecard.report())
+
+            if scorecard.detection_rate < 1.0:
+                failures.append(
+                    f"detection rate {scorecard.detection_rate * 100:.1f}% "
+                    f"({scorecard.detected_count}/{scorecard.expected_count})"
+                )
+            if scorecard.false_positive_count > 0:
+                failures.append(
+                    f"{scorecard.false_positive_count} unexpected incident(s): {scorecard.unexpected_patterns}"
+                )
 
     finally:
         if real_subprocess_run is not None:
