@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
@@ -19,7 +20,13 @@ def ingest_event(
 
     row = EventORM(**event.model_dump())
     session.add(row)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        response.status_code = status.HTTP_200_OK
+        return session.get(EventORM, event.event_id)
+
     session.refresh(row)
     response.status_code = status.HTTP_201_CREATED
     return row
