@@ -28,6 +28,7 @@ detection-engine/
 │   ├── test_events_endpoint.py
 │   ├── test_correlation.py
 │   ├── test_scorecard.py
+│   ├── test_events_concurrency.py
 │   ├── test_init_db.py
 │   ├── evaluate_correlation_rules.py  # standalone script, not pytest — see docs/detection-rate-baseline.md
 │   └── requirements.txt
@@ -239,6 +240,45 @@ like a discrete attacker action. **Fix:** `_SAME_SOURCE_EXCLUDED_EVENT_TYPES
 [`docs/detection-rate-baseline.md`](../docs/detection-rate-baseline.md)
 for the full before/after numbers (25.0% → 0.0% false positive rate,
 100.0% detection rate unchanged).
+
+**Two race conditions in event handling, found on 2026-10-03 by firing
+genuinely concurrent requests at a live server** (`tests/test_events_concurrency.py`,
+`tests/test_correlation.py`'s "Event ordering" section) rather than
+reasoning about concurrency in the abstract:
+
+1. **`POST /events` could 500 on a duplicate `event_id` under real
+   concurrency.** `ingest_event()` checks whether an event already
+   exists, then inserts if not — classic TOCTOU: two concurrent requests
+   for the same `event_id` (a producer retrying a POST after a timeout,
+   per `DetectionEngineHandler`'s best-effort, 2s-timeout forwarding)
+   could both pass the check before either commits, and the second
+   commit then hit `UNIQUE constraint failed` as an unhandled 500
+   instead of the intended idempotent 200. Reproduced with 20 genuinely
+   concurrent requests against a live server: 5/20 got a 500. **Fix:**
+   catch the `IntegrityError` on commit, roll back, and return the
+   now-committed row from the request that won the race — the same
+   outcome the existence check above would have given it.
+2. **`StaticPool` was forcing every sqlite connection — file-based or
+   not — onto one shared raw connection, process-wide.** `StaticPool` is
+   only actually *needed* for `sqlite:///:memory:` (a new connection to
+   `:memory:` is a separate, empty database, so every session has to
+   share one). Applying it to file-based sqlite too meant concurrent
+   requests shared one raw connection across threads regardless, which
+   can corrupt that connection's cursor state outright rather than
+   raising a clean, catchable error — confirmed by the fact that fix #1
+   alone still left the reproduction flaky (~40% failure rate) until
+   this was scoped to `:memory:` specifically. Production (Postgres) was
+   never affected — this only ever applied to the sqlite fallback.
+3. **Correlation's event ordering wasn't deterministic under timestamp
+   ties.** `correlate()` and `run_correlation()` sorted strictly by
+   `timestamp`; two events sharing an identical one (coarse producer
+   clocks, or two events racing into the table per #1 above) had their
+   relative order left to whatever a database's `ORDER BY` happens to do
+   with ties — unspecified by SQL, not guaranteed to match across
+   backends. Which specific event a pairing or burst claimed was
+   effectively a coin flip. **Fix:** `event_id` as a secondary sort key
+   everywhere events are ordered for correlation, making the outcome a
+   reproducible rule instead.
 
 ## Running the tests
 
