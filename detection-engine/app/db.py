@@ -12,11 +12,12 @@ class Base(DeclarativeBase):
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./detection_engine.db")
 
 _is_sqlite = DATABASE_URL.startswith("sqlite")
+_is_memory_sqlite = DATABASE_URL in ("sqlite:///:memory:", "sqlite://")
 engine = create_engine(
     DATABASE_URL,
     echo=False,
     connect_args={"check_same_thread": False} if _is_sqlite else {},
-    poolclass=StaticPool if _is_sqlite else None,
+    poolclass=StaticPool if _is_memory_sqlite else None,
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
