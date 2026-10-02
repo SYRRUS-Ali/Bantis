@@ -191,7 +191,7 @@ def _find_composite_incidents(events: list[EventORM], claimed: set[str]) -> list
 
 def correlate(events: list[EventORM]) -> list[IncidentORM]:
     events = [e for e in events if not _is_error(e)]
-    events = sorted(events, key=lambda e: e.timestamp)
+    events = sorted(events, key=lambda e: (e.timestamp, e.event_id))
     claimed: set[str] = set()
 
     incidents: list[IncidentORM] = []
@@ -208,7 +208,7 @@ def run_correlation(session: Session) -> list[IncidentORM]:
 
     events = [
         event
-        for event in session.query(EventORM).order_by(EventORM.timestamp).all()
+        for event in session.query(EventORM).order_by(EventORM.timestamp, EventORM.event_id).all()
         if event.event_id not in already_correlated
     ]
 

@@ -255,6 +255,34 @@ def test_unrelated_scenario_types_never_form_a_composite_incident():
     assert incidents[0].pattern == "same-source-burst"
 
 
+# ---- Event ordering: deterministic under timestamp ties --------------------
+
+
+def test_composite_pairing_is_deterministic_when_two_candidates_tie_on_timestamp():
+    dep_a = _event("dep-a", "attack-sim", "attack_scenario_run", 0, scenario="malicious-dependency")
+    dep_b = _event("dep-b", "attack-sim", "attack_scenario_run", 0, scenario="malicious-dependency")
+    secret = _event("secret", "attack-sim", "attack_scenario_run", 50, scenario="leaked-secret")
+
+    forward = correlate([dep_a, dep_b, secret])
+    reversed_input = correlate([dep_b, dep_a, secret])
+
+    assert len(forward) == 1 and len(reversed_input) == 1
+    assert sorted(forward[0].correlated_event_ids) == sorted(reversed_input[0].correlated_event_ids)
+    # dep-a sorts before dep-b, so it's the deterministic winner either way
+    assert "dep-a" in forward[0].correlated_event_ids
+    assert "dep-a" in reversed_input[0].correlated_event_ids
+
+
+def test_same_source_cluster_order_is_deterministic_when_timestamps_tie():
+    e_a = _event("a-event", "attack-sim", "attack_scenario_run", 0)
+    e_b = _event("b-event", "attack-sim", "attack_scenario_run", 0)
+
+    forward = correlate([e_a, e_b])
+    reversed_input = correlate([e_b, e_a])
+
+    assert forward[0].correlated_event_ids == reversed_input[0].correlated_event_ids == ["a-event", "b-event"]
+
+
 # ---- Pattern 3: untrusted registry pull ------------------------------------
 
 
