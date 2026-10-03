@@ -21,11 +21,13 @@ detection-engine/
 │   ├── incident_models.py    # IncidentORM table definition
 │   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's three patterns
 │   ├── scorecard.py            # generate_scorecard() — detection rate, false positives, MTTD
-│   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut)
+│   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut, IncidentOut/IncidentListOut)
 │   └── routers/
-│       └── events.py            # POST /events — the ingestion endpoint
+│       ├── events.py            # POST /events — the ingestion endpoint
+│       └── incidents.py          # GET /incidents, GET /incidents/{id} — query API
 ├── tests/
 │   ├── test_events_endpoint.py
+│   ├── test_incidents_endpoint.py
 │   ├── test_correlation.py
 │   ├── test_scorecard.py
 │   ├── test_events_concurrency.py
@@ -126,6 +128,21 @@ problem — e.g. every empty-`source` event quietly forming its own
 same-source-burst incident. `level` accepts any of Python's actual
 logging levels (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`), not just
 the `INFO`/`WARNING`/`ERROR` examples in `docs/event-schema.md`.
+
+**A read-only incidents API exists, as the foundation for the planned
+dashboard.** `GET /incidents` lists incidents newest-first with optional
+exact-match filters (`severity`, `pattern`), a `since` cutoff (ISO 8601;
+only incidents created at or after it), and pagination (`limit`,
+default 50, max 200; `offset`), returning `{total, limit, offset,
+items}` so a UI can build page controls without a second request.
+`GET /incidents/{incident_id}` returns one incident's full record, or
+404. `severity` is validated against the closed four-value enum from
+`docs/correlation-design.md` (422 on anything else); `pattern` is
+deliberately **not** validated against today's three values — the design
+doc already treats extending that enum as how a v2 rule gets added, so
+hard-validating it here would mean every new correlation rule also needs
+an API change just to be filterable. No write endpoints: incidents are
+only ever created by `run_correlation()`, never directly by a client.
 
 ## Database
 
