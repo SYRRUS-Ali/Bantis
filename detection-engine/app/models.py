@@ -28,3 +28,25 @@ class EventOut(EventIn):
     received_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class IncidentOut(BaseModel):
+
+    incident_id: str
+    created_at: datetime
+    pattern: str
+    window_seconds: int
+    correlated_event_ids: list[str]
+    mitre_techniques: list[str]
+    severity: str
+    confidence: float
+    summary: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IncidentListOut(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[IncidentOut]
