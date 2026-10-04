@@ -149,6 +149,81 @@ Being upfront about what's rough, not just what works:
   [`docs/scenarios.md`](docs/scenarios.md). Worth reading before assuming
   a scenario always cleans up after itself.
 
+## M3: Detection Engine
+
+🚧 In progress — ingestion, three correlation rules, a scorecard
+(detection rate / false positives / MTTD), and a read-only incidents
+query API are built. The AI-assisted analysis layer (M4) and the
+dashboard itself — the thing M3's query API exists to feed — come next.
+
+### What's in it
+
+- **Ingestion**: `POST /events` accepts the same envelope M1 and M2
+  already emit, validating identifier fields and `level` at the boundary
+  rather than storing malformed data. Idempotent on `event_id`.
+- **Three correlation rules**, applied most-specific-first: a composite
+  dependency+secret pairing, a single untrusted-registry image pull, and
+  a generic same-source burst (scoped to discrete attacker-relevant
+  events — ordinary `http_request` traffic is excluded). One shared
+  formula computes every rule's confidence score. Full rules reference:
+  [`docs/correlation-design.md`](docs/correlation-design.md).
+- **A scorecard generator** (`detection-engine/app/scorecard.py`):
+  detection rate, false positives, and MTTD for a run, scored against a
+  known-good expectation — the measurement
+  [`docs/threat-model.md`](docs/threat-model.md) names as what "success"
+  looks like.
+- **A read-only incidents API** (`GET /incidents`, `GET
+  /incidents/{id}`) — filterable, paginated, the foundation the
+  dashboard queries against.
+- A separate, independently-deployable component from `range/` and
+  `attack-sim/`, sharing no dependencies or lifecycle with either.
+
+### How to run it
+
+```bash
+cd detection-engine
+pip install -r requirements.txt
+python -m uvicorn app.main:app --reload
+curl http://localhost:8000/health
+curl http://localhost:8000/incidents
+```
+
+### Architecture (short version)
+
+```
+range/api, nginx, attack-sim → POST /events → events table
+                                                    │
+                                             run_correlation()
+                                                    │
+                                             incidents table
+                                                    │
+                                   GET /incidents, /incidents/{id}
+                                                    │
+                                   (dashboard — M4+, not built yet)
+```
+
+Full component table, data flow, and rules reference:
+[`docs/detection-engine-architecture.md`](docs/detection-engine-architecture.md).
+
+### Known limitations
+
+- **`run_correlation()` isn't scheduled or triggered automatically
+  yet** — it's invoked manually or by a test script today; ingestion and
+  correlation are intentionally decoupled stages.
+- **No authentication on the API** — the current trust model assumes a
+  single local operator, same as the rest of v1; revisit before this is
+  reachable beyond localhost.
+- **Real problems found and fixed while building this** — an
+  incidents table that a real app startup never created, an
+  `ERROR`-status scenario run that was being correlated as if it were a
+  real attack outcome, ordinary API traffic that was a 25% false-positive
+  source, and two race conditions (a duplicate-event ingestion crash and
+  non-deterministic correlation ordering under timestamp ties) — are
+  logged in full, with root cause and fix, in
+  [`detection-engine/README.md`](detection-engine/README.md#known-issues).
+  Worth reading before assuming the correlation rules were right on the
+  first try.
+
 ## License
 
 MIT
