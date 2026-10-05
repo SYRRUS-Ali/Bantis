@@ -151,10 +151,12 @@ Being upfront about what's rough, not just what works:
 
 ## M3: Detection Engine
 
-🚧 In progress — ingestion, three correlation rules, a scorecard
+🚧 Sprint 3 closed — ingestion, three correlation rules, a scorecard
 (detection rate / false positives / MTTD), and a read-only incidents
-query API are built. The AI-assisted analysis layer (M4) and the
-dashboard itself — the thing M3's query API exists to feed — come next.
+query API are built. What it does not do yet, and what must be fixed
+before it is exposed beyond localhost (notably: no authentication on
+any route), is in [`docs/m3-closure.md`](docs/m3-closure.md). The
+AI-assisted analysis layer (M4) and the dashboard come next.
 
 ### What's in it
 
