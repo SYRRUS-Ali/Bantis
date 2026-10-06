@@ -35,7 +35,9 @@ network intrusion detection system in v1.
 - **Operator ⟷ Bantis**: trusted, authenticated via the admin account
   created in the setup wizard.
 - **Bantis ⟷ AI provider**: semi-trusted. Only correlated incident data is
-  sent for analysis, never raw secrets or credentials.
+  sent for analysis, never raw secrets or credentials — the exact
+  allowlisted shape is fixed in
+  [`docs/ai-copilot-contract.md`](ai-copilot-contract.md).
 - **Bantis ⟷ Range**: the range is intentionally the vulnerable surface being
   monitored, not part of Bantis's own trust boundary.
 
