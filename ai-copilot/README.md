@@ -17,11 +17,15 @@ have to each other.
 ```
 ai-copilot/
 ├── models.py              # CopilotRequest/CopilotResponse — docs/ai-copilot-contract.md's shape
+├── converter.py           # build_copilot_request() — detection-engine incident + events → CopilotRequest
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
+├── examples/
+│   └── send_test_request.py  # manual smoke test against the real API
 ├── tests/
 │   ├── test_models.py
+│   ├── test_converter.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -33,13 +37,36 @@ abstraction (`AIProvider`), per [ADR 0003](../docs/adr/0003-single-ai-provider-f
 — adding a second provider later means writing a new class that
 implements `AIProvider`, not touching anything that calls `analyze()`.
 
-**Not built yet** (later Sprint 4 items, intentionally out of scope
-here): the incident-to-`CopilotRequest` converter that would actually
-feed `detection-engine/`'s real incidents into this (today, a caller
-builds a `CopilotRequest` by hand — see the tests for the shape); the
-decision log; throttling; a token-budget guard; the "ask a follow-up
-question" endpoint; and any wiring into `detection-engine/` itself. This
-is the client and its contract, not the pipeline.
+**The evidence-timeline converter** (`converter.py`) turns
+detection-engine's own JSON — an `IncidentOut` as `GET /incidents/{id}`
+returns it, plus `EventOut`-shaped event dicts — into a `CopilotRequest`.
+It's where the contract's trust boundary is actually enforced:
+
+- Only `artifact`, `tool_returncode`, `registry`, and `image` are copied
+  from an event's `details` into `summary_fields`
+  (`SUMMARY_FIELDS_ALLOWLIST`). `tool_output_tail` — which can carry the
+  matched secret text from a real `gitleaks` scan — `message`, `logger`,
+  and any field nobody has reviewed are dropped, by never being copied
+  rather than by being filtered out.
+- The timeline is ordered by `(timestamp, event_id)`, the same order
+  detection-engine's `correlate()` uses.
+- Timestamps are normalized to UTC: detection-engine's SQLite backend
+  returns them without a timezone, and a mix of naive and aware values
+  can't be sorted.
+- If the incident references an event that wasn't provided, it raises
+  `MissingEvidenceError` instead of sending a partial timeline the model
+  would have no way to know was partial.
+
+Verified against real output, not just hand-written dicts: events with a
+fake AWS key in `tool_output_tail` were posted to a live detection-engine,
+correlated into a real incident, read back through `GET /incidents`, and
+converted — the key does not appear in the resulting request.
+
+**Not built yet** (later Sprint 4 items): fetching the incident and its
+events from detection-engine — there's no `GET /events` route yet, so a
+caller passes the events in; the decision log; throttling; a
+token-budget guard; the "ask a follow-up question" endpoint; and any
+wiring into `detection-engine/` itself.
 
 ### Validation and retries
 
@@ -71,6 +98,21 @@ check a flag: there is no code path in this component, today, that
 executes a proposed action at all.
 
 ## How to use it
+
+From detection-engine's JSON (the normal path):
+
+```python
+from converter import build_copilot_request
+from providers.claude import ClaudeProvider
+
+incident = ...  # dict: GET /incidents/{incident_id} response body
+events = ...    # list of dicts in EventOut shape, covering incident["correlated_event_ids"]
+
+request = build_copilot_request(incident, events)
+response = ClaudeProvider().analyze(request)
+```
+
+Or building a `CopilotRequest` by hand:
 
 ```python
 from datetime import datetime, timezone
