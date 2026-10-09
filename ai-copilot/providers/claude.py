@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 
 import anthropic
 
 from models import CopilotRequest, CopilotResponse, ProposedAction
+from parser import OutputParseError, parse_model_output
 from providers.base import AIProvider
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
-_MAX_VALIDATION_RETRIES = 2
+MAX_VALIDATION_RETRIES = 2
+_MAX_TOKENS = 1024
 
 _SYSTEM_PROMPT = """\
 You are Bantis's AI Copilot. You analyze one correlated security \
@@ -38,17 +39,6 @@ happens, with no exception."""
 
 
 class ClaudeProvider(AIProvider):
-    """The AIProvider implementation ADR 0003's abstraction exists for --
-    swapping in a different provider later means writing a new class
-    that implements AIProvider, not touching anything that calls
-    analyze().
-
-    `client` is accepted for dependency injection: tests pass a fake
-    object with a `.messages.create()` method instead of this talking to
-    the real API, the same reason attack-sim's tests inject a fake
-    subprocess.run rather than needing a real docker/gitleaks install.
-    """
-
     def __init__(
         self,
         api_key: str | None = None,
@@ -59,45 +49,41 @@ class ClaudeProvider(AIProvider):
         self._model = model
 
     def analyze(self, request: CopilotRequest) -> CopilotResponse:
-        payload = request.model_dump_json()
-        last_error: str | None = None
+        incident_id = request.incident.incident_id
+        messages: list[dict] = [{"role": "user", "content": request.model_dump_json()}]
+        last_error = "no attempt made"
+        attempts = MAX_VALIDATION_RETRIES + 1
 
-        for attempt in range(_MAX_VALIDATION_RETRIES + 1):
-            user_message = payload if attempt == 0 else (
-                f"{payload}\n\nYour previous response was invalid: {last_error}. "
-                "Return ONLY the corrected JSON object, nothing else."
-            )
-
+        for _ in range(attempts):
             try:
                 reply = self._client.messages.create(
                     model=self._model,
-                    max_tokens=1024,
+                    max_tokens=_MAX_TOKENS,
                     system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user_message}],
+                    messages=messages,
                 )
             except anthropic.APIError as exc:
-                return _analysis_failed(request.incident.incident_id, self._model, str(exc))
+                return _analysis_failed(incident_id, self._model, f"provider error: {exc}")
 
+            text = "".join(block.text for block in reply.content if block.type == "text")
             try:
-                return _parse_response(reply, request.incident.incident_id, self._model)
-            except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                if getattr(reply, "stop_reason", None) == "max_tokens":
+                    raise OutputParseError(
+                        f"the response was cut off at the {_MAX_TOKENS}-token limit -- keep the reasoning shorter"
+                    )
+                return parse_model_output(text, incident_id, self._model)
+            except OutputParseError as exc:
                 last_error = str(exc)
+                messages = _with_correction(messages, text, last_error)
 
-        return _analysis_failed(request.incident.incident_id, self._model, last_error)
+        return _analysis_failed(incident_id, self._model, f"no valid response after {attempts} attempts: {last_error}")
 
 
-def _parse_response(reply: anthropic.types.Message, incident_id: str, model: str) -> CopilotResponse:
-    raw_text = "".join(block.text for block in reply.content if block.type == "text")
-    parsed = json.loads(raw_text)
-
-    return CopilotResponse(
-        incident_id=incident_id,
-        reasoning=parsed["reasoning"],
-        confidence=parsed["confidence"],
-        proposed_action=ProposedAction(**parsed["proposed_action"]),
-        model=model,
-        generated_at=datetime.now(timezone.utc),
-    )
+def _with_correction(messages: list[dict], bad_text: str, error: str) -> list[dict]:
+    correction = f"Your previous response was invalid: {error}. Return ONLY the corrected JSON object, nothing else."
+    if bad_text.strip():
+        return [*messages, {"role": "assistant", "content": bad_text}, {"role": "user", "content": correction}]
+    return [{"role": "user", "content": f"{messages[0]['content']}\n\n{correction}"}]
 
 
 def _analysis_failed(incident_id: str, model: str, reason: str | None) -> CopilotResponse:

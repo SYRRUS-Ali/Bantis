@@ -40,7 +40,11 @@ def _request() -> CopilotRequest:
 
 
 def _text_message(payload: dict) -> SimpleNamespace:
-    return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(payload))])
+    return _raw_message(json.dumps(payload))
+
+
+def _raw_message(text: str, stop_reason: str = "end_turn") -> SimpleNamespace:
+    return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason=stop_reason)
 
 
 _VALID_REPLY = {
@@ -97,8 +101,11 @@ def test_analyze_retries_on_malformed_json_then_succeeds():
 
     assert response.proposed_action.type == "flag_for_review"
     assert len(client.messages.calls) == 2
-    # the retry tells the model what went wrong
-    assert "previous response was invalid" in client.messages.calls[1]["messages"][0]["content"]
+
+    retry_messages = client.messages.calls[1]["messages"]
+    assert [m["role"] for m in retry_messages] == ["user", "assistant", "user"]
+    assert retry_messages[1]["content"] == json.dumps({"not": "the expected shape"})
+    assert "missing required field 'reasoning'" in retry_messages[2]["content"]
 
 
 def test_analyze_falls_back_to_analysis_failed_after_exhausting_retries():
@@ -153,3 +160,64 @@ def test_requires_an_api_key_when_no_client_is_injected(monkeypatch):
 
     with pytest.raises(KeyError):
         ClaudeProvider()
+
+# ---- Output parsing through the provider ------------------------------------
+
+
+def test_a_fenced_json_reply_is_accepted_without_spending_a_retry():
+    client = _fake_client(_raw_message("Here's my analysis:\n```json\n" + json.dumps(_VALID_REPLY) + "\n```"))
+
+    response = ClaudeProvider(client=client).analyze(_request())
+
+    assert response.proposed_action.type == "flag_for_review"
+    assert len(client.messages.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_reply",
+    [
+        json.dumps([_VALID_REPLY]),
+        json.dumps({**_VALID_REPLY, "proposed_action": "flag_for_review"}),
+    ],
+    ids=["top-level-array", "proposed-action-as-string"],
+)
+def test_malformed_shapes_fall_back_instead_of_crashing_the_caller(bad_reply):
+    client = _fake_client(_raw_message(bad_reply), _raw_message(bad_reply), _raw_message(bad_reply))
+
+    response = ClaudeProvider(client=client).analyze(_request())
+
+    assert response.proposed_action.type == "analysis_failed"
+    assert len(client.messages.calls) == 3
+
+
+def test_a_truncated_reply_gets_specific_feedback():
+    client = _fake_client(
+        _raw_message('{"reasoning": "a very long analysis that got cut', stop_reason="max_tokens"),
+        _text_message(_VALID_REPLY),
+    )
+
+    response = ClaudeProvider(client=client).analyze(_request())
+
+    assert response.proposed_action.type == "flag_for_review"
+    assert "token limit" in client.messages.calls[1]["messages"][-1]["content"]
+
+
+def test_an_empty_reply_is_not_sent_back_as_an_empty_assistant_turn():
+    client = _fake_client(_raw_message(""), _text_message(_VALID_REPLY))
+
+    response = ClaudeProvider(client=client).analyze(_request())
+
+    assert response.proposed_action.type == "flag_for_review"
+    retry_messages = client.messages.calls[1]["messages"]
+    assert [m["role"] for m in retry_messages] == ["user"]
+    assert "response was empty" in retry_messages[0]["content"]
+
+
+def test_the_failure_reason_names_the_attempt_count_and_last_error():
+    bad = json.dumps({**_VALID_REPLY, "confidence": 7})
+    client = _fake_client(_raw_message(bad), _raw_message(bad), _raw_message(bad))
+
+    response = ClaudeProvider(client=client).analyze(_request())
+
+    assert "after 3 attempts" in response.reasoning
+    assert "confidence" in response.reasoning
