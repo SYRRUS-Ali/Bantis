@@ -18,6 +18,7 @@ have to each other.
 ai-copilot/
 ├── models.py              # CopilotRequest/CopilotResponse — docs/ai-copilot-contract.md's shape
 ├── converter.py           # build_copilot_request() — detection-engine incident + events → CopilotRequest
+├── parser.py              # parse_model_output() — model text → validated CopilotResponse (provider-agnostic)
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -26,6 +27,7 @@ ai-copilot/
 ├── tests/
 │   ├── test_models.py
 │   ├── test_converter.py
+│   ├── test_parser.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -70,15 +72,33 @@ wiring into `detection-engine/` itself.
 
 ### Validation and retries
 
-`ClaudeProvider.analyze()` sends the request, parses the model's reply
-as the JSON shape `docs/ai-copilot-contract.md` defines, and validates
-it through `models.py`'s Pydantic schema. On a malformed or
-schema-invalid reply, it retries up to twice with the validation error
-fed back to the model (3 attempts total) before giving up. A
-provider-level failure (the connection itself failing, not a bad reply)
-is **not** retried — retrying the same dead connection with "your
-response was invalid" doesn't make sense, so it fails immediately
-instead.
+`parser.py`'s `parse_model_output()` turns the model's raw text into a
+validated `CopilotResponse`, or raises `OutputParseError` — the only
+exception any parse failure produces, with a message written to be fed
+back to the model. It lives outside `providers/` so a second provider
+reuses the same definition of a valid answer. Extraction is lenient (a
+```` ```json ```` fence or a line of prose around the JSON is fine);
+content is strict (a boolean or string `confidence`, whitespace-only
+`reasoning`, a top-level array, or a model-produced `analysis_failed`
+are all rejected, not coerced). Full rule list:
+[`docs/ai-copilot-contract.md#validation`](../docs/ai-copilot-contract.md#validation).
+
+`ClaudeProvider.analyze()` retries a rejected reply up to twice (3
+attempts total) as a continued conversation: the model sees its own
+invalid reply, then exactly what was wrong with it. A reply cut off at
+the token limit is told so specifically. A provider-level failure (the
+connection itself failing, not a bad reply) is **not** retried —
+retrying the same dead connection with "your response was invalid"
+doesn't make sense, so it fails immediately instead.
+
+Found and fixed while building this: two malformed shapes — a top-level
+JSON array, and `proposed_action` sent as a string — used to raise an
+uncaught `TypeError` straight out of `analyze()`, because the old retry
+loop only caught `JSONDecodeError`/`KeyError`/`ValueError`. The caller
+got an exception instead of the contract's `analysis_failed` result.
+`confidence: true` was also silently accepted as `1.0` (`bool` is an
+`int` subclass), and `"0.7"` and whitespace-only `reasoning` were
+accepted too.
 
 Either kind of failure, and running out of retries, produces the same
 fallback: a stored, visible `CopilotResponse` with

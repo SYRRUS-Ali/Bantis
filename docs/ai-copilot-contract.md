@@ -134,18 +134,47 @@ capability that doesn't exist. Adding them is exactly the kind of
 "explicitly configured whitelist" ADR 0004 reserves for a later,
 separately-reviewed decision.
 
-### Validation (feeds the retry logic in a later Sprint 4 item)
+### Validation
+
+Implemented in `ai-copilot/parser.py` (`parse_model_output()`),
+provider-agnostic so a second provider (ADR 0003) reuses the same
+definition of a valid answer.
+
+**Extraction is lenient; content is strict.** A JSON object inside a
+```` ```json ```` fence or after a line of prose is extracted, not
+rejected — models do this often, and the content itself is fine. But a
+reply that is valid JSON and *not* an object (a top-level array, a bare
+string) is rejected rather than dug into: which array element would be
+"the" answer is a guess.
 
 A response is rejected, not accepted-with-a-shrug, if any of:
-- `confidence` isn't a float in `[0.0, 1.0]`.
-- `proposed_action.type` isn't one of the five values above.
-- `proposed_action.requires_approval` isn't exactly `true`.
-- `reasoning` is empty or missing.
+- It contains no JSON object, or is empty.
+- `reasoning`, `confidence`, or `proposed_action` is missing.
+- `confidence` isn't a JSON number in `[0.0, 1.0]`. Strictly a number: a
+  boolean (`true` would otherwise become `1.0`), a string (`"0.7"`),
+  `NaN`, and `Infinity` are all rejected rather than coerced — a type
+  mistake means the model misread the format, and a retry with feedback
+  fixes that more reliably than Bantis guessing what it meant.
+- `reasoning` or `proposed_action.description` is empty or whitespace.
+- `proposed_action` isn't an object.
+- `proposed_action.type` isn't one of the **four** model-producible
+  values. `analysis_failed` is the fifth enum value but is reserved for
+  Bantis's own fallback — a model returning it would make a real answer
+  look like an infrastructure failure.
+- `proposed_action.requires_approval` isn't exactly `true` — not a
+  truthy string, not `1`, and not missing.
 
-On rejection: retry with the validation error fed back to the model, up
-to 2 retries (3 attempts total). If every attempt still fails
-validation, do not guess at a response — fall back to the error
-semantics below instead.
+`incident_id` and `model` in the response are always set by Bantis,
+never read from the model's output — a model can't relabel which
+incident its answer is for.
+
+**Retry.** On rejection, the model sees its own invalid reply as an
+assistant turn followed by a user turn naming exactly what was wrong,
+up to 2 retries (3 attempts total) — correcting a specific output works
+better than regenerating blind. A reply cut off at the token limit gets
+told so specifically. If every attempt fails, do not guess at a
+response — fall back to the error semantics below, with the attempt
+count and the last validation error as the reason.
 
 ## Security constraints
 
