@@ -19,6 +19,8 @@ ai-copilot/
 ├── models.py              # CopilotRequest/CopilotResponse — docs/ai-copilot-contract.md's shape
 ├── converter.py           # build_copilot_request() — detection-engine incident + events → CopilotRequest
 ├── parser.py              # parse_model_output() — model text → validated CopilotResponse (provider-agnostic)
+├── detection_client.py    # read-only HTTP client for detection-engine's incidents API
+├── worker.py              # polls for new incidents and analyzes each one automatically
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -28,6 +30,7 @@ ai-copilot/
 │   ├── test_models.py
 │   ├── test_converter.py
 │   ├── test_parser.py
+│   ├── test_worker.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -64,11 +67,47 @@ fake AWS key in `tool_output_tail` were posted to a live detection-engine,
 correlated into a real incident, read back through `GET /incidents`, and
 converted — the key does not appear in the resulting request.
 
-**Not built yet** (later Sprint 4 items): fetching the incident and its
-events from detection-engine — there's no `GET /events` route yet, so a
-caller passes the events in; the decision log; throttling; a
-token-budget guard; the "ask a follow-up question" endpoint; and any
-wiring into `detection-engine/` itself.
+**Automatic analysis of new incidents** (`worker.py`): polls
+detection-engine's `GET /incidents?since=` and, for each incident it
+hasn't analyzed yet, fetches its evidence from `GET /incidents/{id}/events`,
+converts it, and runs it through the provider. Each result goes to a
+sink — by default one JSON line on stdout.
+
+Polling rather than detection-engine pushing to the Copilot:
+detection-engine stays unaware the Copilot exists (the dependency runs
+one way, as the dashboard's will), and if the Copilot is down incidents
+wait instead of a push being lost. How it avoids missing or repeating
+an incident:
+
+- **Only new ones.** Incidents created before the worker started are
+  skipped (`--since` backfills older ones on purpose).
+- **Late commits.** `correlate()` stamps `created_at` before
+  `run_correlation()` commits, so an incident can appear after a newer
+  one was already seen. Each poll re-reads 60s behind the newest
+  incident seen, and skips ids it already analyzed.
+- **Retries.** If an incident's events can't be fetched, it's retried
+  next poll, and the cursor is held at it so newer incidents can't push
+  it out of the query window. Without that hold, an outage longer than
+  60s would drop it silently — found by a test, fixed, and covered by
+  one now.
+- **Never re-billed.** An incident is marked done once analyzed, even if
+  the result is `analysis_failed` or the sink fails (the analysis then
+  goes to stderr instead of being lost).
+- **Missing evidence** isn't sent to the AI at all — it's recorded as
+  `analysis_failed` without a provider call.
+
+Detection-engine is reached through `detection_client.py`, which uses
+`http.client` with the URL scheme checked up front, the same as the
+producers' `DetectionEngineHandler` — not `urllib.request.urlopen`,
+which Semgrep flagged in this repo before.
+
+**Not built yet** (later Sprint 4 items): persistent storage for the
+analyses (the decision log — today they're JSON lines on stdout, and the
+worker's memory of what it analyzed doesn't survive a restart);
+throttling; a token-budget guard; and the "ask a follow-up question"
+endpoint. `run_correlation()` itself is still not automatic in
+detection-engine, so an incident only exists for the worker to find once
+something has called it.
 
 ### Validation and retries
 
@@ -167,12 +206,20 @@ print(response.reasoning, response.proposed_action.type)
 
 ## Running it
 
+The automatic worker, against a running detection-engine:
+
 ```bash
 cd ai-copilot
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-...
-python3 -c "..."   # see "How to use it" above
+python3 worker.py --detection-engine-url http://localhost:8000            # poll every 30s, new incidents only
+python3 worker.py --detection-engine-url http://localhost:8000 --once     # a single poll, then exit
+python3 worker.py --since 2026-10-10T00:00:00Z --once                     # also analyze older incidents
 ```
+
+Each analysis is printed to stdout as one JSON line (`{"incident": ...,
+"analysis": ...}`); logs go to stderr. Every new incident is one paid
+API call to your Anthropic account.
 
 ## Running the tests
 

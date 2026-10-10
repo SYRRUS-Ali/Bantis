@@ -24,7 +24,7 @@ detection-engine/
 │   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut, IncidentOut/IncidentListOut)
 │   └── routers/
 │       ├── events.py            # POST /events — the ingestion endpoint
-│       └── incidents.py          # GET /incidents, GET /incidents/{id} — query API
+│       └── incidents.py          # GET /incidents, /incidents/{id}, /incidents/{id}/events — query API
 ├── tests/
 │   ├── test_events_endpoint.py
 │   ├── test_incidents_endpoint.py
@@ -143,6 +143,21 @@ doc already treats extending that enum as how a v2 rule gets added, so
 hard-validating it here would mean every new correlation rule also needs
 an API change just to be filterable. No write endpoints: incidents are
 only ever created by `run_correlation()`, never directly by a client.
+
+`GET /incidents/{incident_id}/events` returns the incident's correlated
+events in the order `correlate()` saw them (`timestamp`, then
+`event_id`). This is what ai-copilot's worker reads to analyze new
+incidents automatically. It returns `details` **unfiltered**, including
+`tool_output_tail`, because an operator triaging an incident needs the
+real tool output. The AI provider's allowlist is applied in ai-copilot's
+converter, not here. This does make the "no authentication" limitation
+below more serious: anyone who can reach this port can now read stored
+gitleaks output, which can contain a matched secret.
+
+`GET /incidents` breaks `created_at` ties by `incident_id`. Without
+that, incidents sharing a timestamp have no defined order across
+`limit`/`offset` pages, so a client paging through could see one twice
+and miss another.
 
 ## Database
 
