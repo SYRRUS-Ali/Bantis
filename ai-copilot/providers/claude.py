@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 
 import anthropic
 
-from models import CopilotRequest, CopilotResponse, ProposedAction
+from models import CopilotRequest, CopilotResponse
 from parser import OutputParseError, parse_model_output
 from providers.base import AIProvider
 
@@ -63,7 +62,7 @@ class ClaudeProvider(AIProvider):
                     messages=messages,
                 )
             except anthropic.APIError as exc:
-                return _analysis_failed(incident_id, self._model, f"provider error: {exc}")
+                return CopilotResponse.analysis_failed(incident_id, self._model, f"provider error: {exc}")
 
             text = "".join(block.text for block in reply.content if block.type == "text")
             try:
@@ -76,7 +75,7 @@ class ClaudeProvider(AIProvider):
                 last_error = str(exc)
                 messages = _with_correction(messages, text, last_error)
 
-        return _analysis_failed(incident_id, self._model, f"no valid response after {attempts} attempts: {last_error}")
+        return CopilotResponse.analysis_failed(incident_id, self._model, f"no valid response after {attempts} attempts: {last_error}")
 
 
 def _with_correction(messages: list[dict], bad_text: str, error: str) -> list[dict]:
@@ -84,18 +83,3 @@ def _with_correction(messages: list[dict], bad_text: str, error: str) -> list[di
     if bad_text.strip():
         return [*messages, {"role": "assistant", "content": bad_text}, {"role": "user", "content": correction}]
     return [{"role": "user", "content": f"{messages[0]['content']}\n\n{correction}"}]
-
-
-def _analysis_failed(incident_id: str, model: str, reason: str | None) -> CopilotResponse:
-    return CopilotResponse(
-        incident_id=incident_id,
-        reasoning=f"analysis unavailable: {reason or 'unknown error'}",
-        confidence=0.0,
-        proposed_action=ProposedAction(
-            type="analysis_failed",
-            description="The AI Copilot could not produce a valid analysis for this incident.",
-            requires_approval=True,
-        ),
-        model=model,
-        generated_at=datetime.now(timezone.utc),
-    )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -73,3 +73,18 @@ class CopilotResponse(BaseModel):
     proposed_action: ProposedAction
     model: str
     generated_at: datetime
+
+    @classmethod
+    def analysis_failed(cls, incident_id: str, model: str, reason: str) -> CopilotResponse:
+        return cls(
+            incident_id=incident_id,
+            reasoning=f"analysis unavailable: {reason}",
+            confidence=0.0,
+            proposed_action=ProposedAction(
+                type="analysis_failed",
+                description="The AI Copilot could not produce a valid analysis for this incident.",
+                requires_approval=True,
+            ),
+            model=model,
+            generated_at=datetime.now(timezone.utc),
+        )

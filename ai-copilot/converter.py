@@ -11,7 +11,7 @@ class MissingEvidenceError(ValueError):
     pass
 
 
-def _as_utc_datetime(value: str | datetime) -> datetime:
+def as_utc_datetime(value: str | datetime) -> datetime:
     moment = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
@@ -22,7 +22,7 @@ def _to_evidence_entry(event: dict) -> EvidenceEntry:
     details = event.get("details") or {}
     return EvidenceEntry(
         event_id=event["event_id"],
-        timestamp=_as_utc_datetime(event["timestamp"]),
+        timestamp=as_utc_datetime(event["timestamp"]),
         source=event["source"],
         event_type=event["event_type"],
         scenario=details.get("scenario"),
@@ -44,6 +44,6 @@ def build_copilot_request(incident: dict, events: list[dict]) -> CopilotRequest:
     timeline.sort(key=lambda entry: (entry.timestamp, entry.event_id))
 
     return CopilotRequest(
-        incident=IncidentPayload(**{**incident, "created_at": _as_utc_datetime(incident["created_at"])}),
+        incident=IncidentPayload(**{**incident, "created_at": as_utc_datetime(incident["created_at"])}),
         evidence_timeline=timeline,
     )
