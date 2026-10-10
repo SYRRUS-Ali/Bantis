@@ -170,3 +170,65 @@ def test_get_incident_returns_404_when_not_found(client):
     response = client.get("/incidents/does-not-exist")
 
     assert response.status_code == 404
+
+def test_list_incidents_pages_deterministically_when_created_at_ties(client):
+    for incident_id in ["a", "b", "c", "d", "e"]:
+        _seed_incident(incident_id, created_at=_T0)
+
+    seen = []
+    for offset in range(0, 5, 2):
+        page = client.get("/incidents", params={"limit": 2, "offset": offset}).json()["items"]
+        seen.extend(item["incident_id"] for item in page)
+
+    assert seen == ["e", "d", "c", "b", "a"]
+
+
+# ---- GET /incidents/{id}/events ---------------------------------------------
+
+
+def _post_event(client, event_id, timestamp, **details):
+    response = client.post(
+        "/events",
+        json={
+            "timestamp": timestamp,
+            "level": "INFO",
+            "logger": "attack_sim",
+            "source": "attack-sim",
+            "event_type": "attack_scenario_run",
+            "event_id": event_id,
+            "message": "m",
+            "details": details,
+        },
+    )
+    assert response.status_code == 201
+
+
+def test_get_incident_events_returns_the_correlated_events_in_timeline_order(client):
+    _post_event(client, "late", "2026-10-04T12:00:50Z", scenario="leaked-secret")
+    _post_event(client, "early", "2026-10-04T12:00:00Z", scenario="malicious-dependency")
+    _post_event(client, "unrelated", "2026-10-04T12:00:10Z", scenario="typosquatting")
+    _seed_incident("inc", correlated_event_ids=["late", "early"])
+
+    response = client.get("/incidents/inc/events")
+
+    assert response.status_code == 200
+    assert [event["event_id"] for event in response.json()] == ["early", "late"]
+
+
+def test_get_incident_events_returns_details_unfiltered(client):
+    """Operators triaging an incident need the full evidence, including
+    tool output; the AI provider's allowlist is applied by ai-copilot's
+    converter, not by this endpoint.
+    """
+    _post_event(client, "sec", "2026-10-04T12:00:00Z", scenario="leaked-secret", tool_output_tail="gitleaks output")
+    _seed_incident("inc", correlated_event_ids=["sec"])
+
+    event = client.get("/incidents/inc/events").json()[0]
+
+    assert event["details"]["tool_output_tail"] == "gitleaks output"
+
+
+def test_get_incident_events_returns_404_for_an_unknown_incident(client):
+    response = client.get("/incidents/does-not-exist/events")
+
+    assert response.status_code == 404
