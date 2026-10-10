@@ -88,3 +88,16 @@ class CopilotResponse(BaseModel):
             model=model,
             generated_at=datetime.now(timezone.utc),
         )
+
+class AttemptRecord(BaseModel):
+    number: int
+    raw_output: str
+    stop_reason: str | None = None
+    error: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+class AnalysisTrace(BaseModel):
+    response: CopilotResponse
+    attempts: list[AttemptRecord] = Field(default_factory=list)
+    system_prompt: str | None = None

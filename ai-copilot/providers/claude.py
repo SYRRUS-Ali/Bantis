@@ -4,7 +4,7 @@ import os
 
 import anthropic
 
-from models import CopilotRequest, CopilotResponse
+from models import AnalysisTrace, AttemptRecord, CopilotRequest, CopilotResponse
 from parser import OutputParseError, parse_model_output
 from providers.base import AIProvider
 
@@ -47,13 +47,17 @@ class ClaudeProvider(AIProvider):
         self._client = client or anthropic.Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
         self._model = model
 
-    def analyze(self, request: CopilotRequest) -> CopilotResponse:
+    def analyze_traced(self, request: CopilotRequest) -> AnalysisTrace:
         incident_id = request.incident.incident_id
         messages: list[dict] = [{"role": "user", "content": request.model_dump_json()}]
+        attempts: list[AttemptRecord] = []
         last_error = "no attempt made"
-        attempts = MAX_VALIDATION_RETRIES + 1
+        max_attempts = MAX_VALIDATION_RETRIES + 1
 
-        for _ in range(attempts):
+        def trace(response: CopilotResponse) -> AnalysisTrace:
+            return AnalysisTrace(response=response, attempts=attempts, system_prompt=_SYSTEM_PROMPT)
+
+        for number in range(1, max_attempts + 1):
             try:
                 reply = self._client.messages.create(
                     model=self._model,
@@ -62,20 +66,40 @@ class ClaudeProvider(AIProvider):
                     messages=messages,
                 )
             except anthropic.APIError as exc:
-                return CopilotResponse.analysis_failed(incident_id, self._model, f"provider error: {exc}")
+                error = f"provider error: {exc}"
+                attempts.append(AttemptRecord(number=number, raw_output="", error=error))
+                return trace(CopilotResponse.analysis_failed(incident_id, self._model, error))
 
             text = "".join(block.text for block in reply.content if block.type == "text")
+            stop_reason = getattr(reply, "stop_reason", None)
+            usage = getattr(reply, "usage", None)
+            attempt = AttemptRecord(
+                number=number,
+                raw_output=text,
+                stop_reason=stop_reason,
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+            )
             try:
-                if getattr(reply, "stop_reason", None) == "max_tokens":
+                if stop_reason == "max_tokens":
                     raise OutputParseError(
                         f"the response was cut off at the {_MAX_TOKENS}-token limit -- keep the reasoning shorter"
                     )
-                return parse_model_output(text, incident_id, self._model)
+                response = parse_model_output(text, incident_id, self._model)
             except OutputParseError as exc:
                 last_error = str(exc)
+                attempts.append(attempt.model_copy(update={"error": last_error}))
                 messages = _with_correction(messages, text, last_error)
+                continue
 
-        return CopilotResponse.analysis_failed(incident_id, self._model, f"no valid response after {attempts} attempts: {last_error}")
+            attempts.append(attempt)
+            return trace(response)
+
+        return trace(
+            CopilotResponse.analysis_failed(
+                incident_id, self._model, f"no valid response after {max_attempts} attempts: {last_error}"
+            )
+        )
 
 
 def _with_correction(messages: list[dict], bad_text: str, error: str) -> list[dict]:

@@ -221,3 +221,61 @@ def test_the_failure_reason_names_the_attempt_count_and_last_error():
 
     assert "after 3 attempts" in response.reasoning
     assert "confidence" in response.reasoning
+
+# ---- Trace for the decision log ---------------------------------------------
+
+
+def _with_usage(message, input_tokens, output_tokens):
+    message.usage = SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+    return message
+
+
+def test_the_trace_keeps_every_attempt_including_rejected_ones():
+    rejected = "Here is my analysis without any JSON."
+    client = _fake_client(
+        _with_usage(_raw_message(rejected), 900, 40),
+        _with_usage(_text_message(_VALID_REPLY), 1100, 90),
+    )
+
+    trace = ClaudeProvider(client=client).analyze_traced(_request())
+
+    assert trace.response.proposed_action.type == "flag_for_review"
+    assert [a.number for a in trace.attempts] == [1, 2]
+    assert trace.attempts[0].raw_output == rejected
+    assert trace.attempts[0].error == "the response did not contain a JSON object"
+    assert trace.attempts[1].error is None
+    assert (trace.attempts[1].input_tokens, trace.attempts[1].output_tokens) == (1100, 90)
+    assert "You are Bantis's AI Copilot" in trace.system_prompt
+
+
+def test_the_trace_records_a_provider_error_as_an_attempt():
+    client = _fake_client(anthropic.APIConnectionError(request=SimpleNamespace()))
+
+    trace = ClaudeProvider(client=client).analyze_traced(_request())
+
+    [attempt] = trace.attempts
+    assert attempt.raw_output == ""
+    assert attempt.error.startswith("provider error:")
+    assert trace.response.proposed_action.type == "analysis_failed"
+
+
+def test_the_trace_records_all_three_attempts_when_retries_run_out():
+    bad = json.dumps({**_VALID_REPLY, "confidence": 7})
+    client = _fake_client(_raw_message(bad), _raw_message(bad), _raw_message(bad))
+
+    trace = ClaudeProvider(client=client).analyze_traced(_request())
+
+    assert len(trace.attempts) == 3
+    assert all("confidence must be a number" in a.error for a in trace.attempts)
+
+
+def test_a_truncated_attempt_records_its_stop_reason():
+    client = _fake_client(
+        _raw_message('{"reasoning": "cut', stop_reason="max_tokens"),
+        _text_message(_VALID_REPLY),
+    )
+
+    trace = ClaudeProvider(client=client).analyze_traced(_request())
+
+    assert trace.attempts[0].stop_reason == "max_tokens"
+    assert "token limit" in trace.attempts[0].error
