@@ -21,6 +21,7 @@ ai-copilot/
 ├── parser.py              # parse_model_output() — model text → validated CopilotResponse (provider-agnostic)
 ├── detection_client.py    # read-only HTTP client for detection-engine's incidents API
 ├── worker.py              # polls for new incidents and analyzes each one automatically
+├── decision_log.py        # append-only, hash-chained record of every analysis (+ show/verify CLI)
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -31,6 +32,7 @@ ai-copilot/
 │   ├── test_converter.py
 │   ├── test_parser.py
 │   ├── test_worker.py
+│   ├── test_decision_log.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -92,7 +94,9 @@ an incident:
   one now.
 - **Never re-billed.** An incident is marked done once analyzed, even if
   the result is `analysis_failed` or the sink fails (the analysis then
-  goes to stderr instead of being lost).
+  goes to stderr instead of being lost). The decision log is the durable
+  memory: an incident already in it is never analyzed again, across
+  restarts and even when `--since` reaches back over it.
 - **Missing evidence** isn't sent to the AI at all — it's recorded as
   `analysis_failed` without a provider call.
 
@@ -101,13 +105,56 @@ Detection-engine is reached through `detection_client.py`, which uses
 producers' `DetectionEngineHandler` — not `urllib.request.urlopen`,
 which Semgrep flagged in this repo before.
 
-**Not built yet** (later Sprint 4 items): persistent storage for the
-analyses (the decision log — today they're JSON lines on stdout, and the
-worker's memory of what it analyzed doesn't survive a restart);
-throttling; a token-budget guard; and the "ask a follow-up question"
-endpoint. `run_correlation()` itself is still not automatic in
-detection-engine, so an incident only exists for the worker to find once
-something has called it.
+**The decision log** (`decision_log.py`) is a durable record of every
+analysis and how it was reached, one per incident, in a SQLite file
+(`ai-copilot/decision_log.db` by default, `--decision-log` or
+`$BANTIS_DECISION_LOG` to change it; gitignored). Each record holds:
+
+- the request the provider saw — the allowlisted `CopilotRequest`, never
+  detection-engine's raw events, so nothing is stored that didn't
+  already cross the trust boundary;
+- the exact system prompt;
+- **every attempt**, including rejected ones: the model's raw output,
+  why it was rejected, the stop reason, and token usage;
+- the final response and its outcome;
+- a note for decisions reached without a model call (missing evidence, a
+  worker error), so the log has no gaps.
+
+It's written before the stdout line, since it's the record and stdout
+is a notification; if the write fails, the whole record goes to stderr
+rather than being lost.
+
+The log is **append-only and hash-chained**: each record's SHA-256
+covers its content and the previous record's hash.
+`python3 decision_log.py verify` recomputes the chain and exits 1 if a
+record was edited or removed from the middle. What that does and
+doesn't protect against:
+
+- It **detects** a stored decision being changed after the fact (e.g.
+  `flag_for_review` rewritten to `no_action_recommended`), and a record
+  deleted from the middle.
+- It does **not** detect deletion of the newest records (the shorter
+  chain is still consistent), or a full rewrite by someone who can write
+  the file and recompute every hash. Catching those needs the latest
+  hash kept somewhere that attacker can't also write. A test pins this
+  limitation so nobody assumes more protection than exists.
+
+Writers take SQLite's write lock (`BEGIN IMMEDIATE`) before reading the
+chain's tip, so two workers appending at once can't both chain from the
+same record. Without it, a concurrency test with 8 writers fails every
+run.
+
+```bash
+python3 decision_log.py show <incident_id>   # every decision for an incident, with all attempts
+python3 decision_log.py verify               # integrity check; exit 1 if altered
+```
+
+**Not built yet** (later Sprint 4 items): throttling; a token-budget
+guard (token usage is now recorded per attempt, ready for it); and the
+"ask a follow-up question" endpoint. Nothing reads the decision log over
+HTTP yet — the dashboard will need that. `run_correlation()` itself is
+still not automatic in detection-engine, so an incident only exists for
+the worker to find once something has called it.
 
 ### Validation and retries
 

@@ -114,7 +114,7 @@ exactly the kind of field nobody has reviewed for secret content.
 | `proposed_action.type` | One of the **closed v1 enum** below. Anything else is a validation failure, not a new action Bantis acts on. |
 | `proposed_action.requires_approval` | **Always `true` in v1.** Not a field the AI chooses — see Security constraints. |
 | `reasoning` | Non-empty. The human-readable basis for the proposed action; this is what an operator reads before approving or rejecting. |
-| `model`, `generated_at` | Recorded for the decision log (a later Sprint 4 item) — which model produced this, and when. |
+| `model`, `generated_at` | Which model produced this, and when — stored in the decision log (`ai-copilot/decision_log.py`) alongside every attempt that led to it. |
 
 **`proposed_action.type` v1 enum:** `notify_operator`,
 `flag_for_review`, `suggest_investigation`, `no_action_recommended`,
