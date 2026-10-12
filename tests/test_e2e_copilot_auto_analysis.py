@@ -76,11 +76,11 @@ class RecordingProvider:
     def __init__(self):
         self.requests = []
 
-    def analyze(self, request):
-        from models import CopilotResponse, ProposedAction
+    def analyze_traced(self, request):
+        from models import AnalysisTrace, AttemptRecord, CopilotResponse, ProposedAction
 
         self.requests.append(request)
-        return CopilotResponse(
+        response = CopilotResponse(
             incident_id=request.incident.incident_id,
             reasoning="recorded",
             confidence=0.5,
@@ -88,11 +88,19 @@ class RecordingProvider:
             model="recording",
             generated_at=datetime.now(timezone.utc),
         )
+        return AnalysisTrace(
+            response=response,
+            attempts=[AttemptRecord(number=1, raw_output=response.model_dump_json())],
+            system_prompt="recording provider",
+        )
 
 
-def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_engine):
+def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_engine, tmp_path):
+    from decision_log import DecisionLog
     from detection_client import DetectionEngineClient
     from worker import CopilotWorker
+
+    log_path = tmp_path / "decisions.db"
 
     _post_event(live_detection_engine, "old-1", "compromised-ci-step", "T1195.002")
     _post_event(live_detection_engine, "old-2", "typosquatting", "T1195.001")
@@ -104,6 +112,7 @@ def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_e
         DetectionEngineClient(live_detection_engine),
         provider,
         on_result=lambda incident, response: delivered.append(incident["incident_id"]),
+        decision_log=DecisionLog(log_path),
     )
 
     assert worker.poll_once() == []
@@ -129,3 +138,10 @@ def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_e
     assert request.incident.pattern == "composite-dependency-secret"
     assert [entry.event_id for entry in request.evidence_timeline] == ["dep-1", "sec-1"]
     assert _FAKE_SECRET not in request.model_dump_json()
+    # The decision has a durable, verifiable record -- and the secret is
+    # not in it either, checked against the file's raw bytes.
+    log = DecisionLog(log_path)
+    assert [d.record.incident_id for d in log.for_incident(new_incident)] == [new_incident]
+    assert not log.has_incident(old_incident)
+    assert log.verify() == []
+    assert _FAKE_SECRET.encode() not in log_path.read_bytes()

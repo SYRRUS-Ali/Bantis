@@ -4,7 +4,7 @@ import pytest
 
 from converter import as_utc_datetime
 from detection_client import DetectionEngineError
-from models import CopilotResponse, ProposedAction
+from models import AnalysisTrace, AttemptRecord, CopilotResponse, ProposedAction
 from providers.base import AIProvider
 from worker import CopilotWorker
 
@@ -69,18 +69,26 @@ class FakeProvider(AIProvider):
         self.analyzed: list[str] = []
         self.raise_for = raise_for
 
-    def analyze(self, request):
+    def analyze_traced(self, request):
         incident_id = request.incident.incident_id
         self.analyzed.append(incident_id)
         if incident_id in self.raise_for:
             raise RuntimeError("provider bug")
-        return CopilotResponse(
+        response = CopilotResponse(
             incident_id=incident_id,
             reasoning="fine",
             confidence=0.5,
             proposed_action=ProposedAction(type="flag_for_review", description="d"),
             model="fake",
             generated_at=_START,
+        )
+        return AnalysisTrace(
+            response=response,
+            attempts=[
+                AttemptRecord(number=1, raw_output="not json", error="the response did not contain a JSON object"),
+                AttemptRecord(number=2, raw_output='{"reasoning": "fine"}', input_tokens=120, output_tokens=40),
+            ],
+            system_prompt="fake system prompt",
         )
 
 
@@ -265,3 +273,96 @@ def test_an_incident_waiting_on_a_retry_is_not_lost_when_the_outage_outlasts_the
     assert provider.analyzed.count("inc-1") == 1
     assert sorted(provider.analyzed) == sorted(["inc-1", "inc-2", "inc-3", "inc-4", "inc-5"])
     assert len(provider.analyzed) == 5  # nothing analyzed twice while the cursor was held
+
+# ---- Decision log ------------------------------------------------------------
+
+
+def _logged_worker(tmp_path, client, provider=None, **kwargs):
+    from decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "decisions.db")
+    worker, delivered = _worker(client, provider, decision_log=log, **kwargs)
+    return worker, delivered, log
+
+
+def test_every_analysis_is_recorded_with_its_full_trace(tmp_path):
+    client = FakeClient([_incident("inc-1", 5)])
+    worker, _, log = _logged_worker(tmp_path, client)
+
+    worker.poll_once()
+
+    [stored] = log.for_incident("inc-1")
+    assert stored.record.outcome == "flag_for_review"
+    assert stored.record.system_prompt == "fake system prompt"
+    assert [a.error for a in stored.record.attempts] == ["the response did not contain a JSON object", None]
+    assert stored.record.request.incident.incident_id == "inc-1"
+
+
+def test_a_restarted_worker_never_reanalyzes_a_logged_incident(tmp_path):
+    """The worker's in-memory set doesn't survive a restart; the decision
+    log does. Even a --since backfill reaching back over an incident that
+    was already analyzed must not pay for it again.
+    """
+    client = FakeClient([_incident("inc-1", 5)])
+    first_provider = FakeProvider()
+    first, _, _ = _logged_worker(tmp_path, client, first_provider)
+    first.poll_once()
+
+    second_provider = FakeProvider()
+    second, delivered, log = _logged_worker(tmp_path, client, second_provider)
+    second.poll_once()
+
+    assert first_provider.analyzed == ["inc-1"]
+    assert second_provider.analyzed == []
+    assert delivered == []
+    assert len(log.for_incident("inc-1")) == 1
+
+
+def test_missing_evidence_is_recorded_without_a_provider_call(tmp_path):
+    client = FakeClient([_incident("inc-1", 5, event_ids=("e1", "gone"))])
+    provider = FakeProvider()
+    worker, _, log = _logged_worker(tmp_path, client, provider)
+
+    worker.poll_once()
+
+    [stored] = log.for_incident("inc-1")
+    assert provider.analyzed == []
+    assert stored.record.outcome == "analysis_failed"
+    assert stored.record.attempts == []
+    assert stored.record.note == "evidence incomplete; not sent to the AI"
+
+
+def test_a_failing_log_write_puts_the_record_on_stderr_and_doesnt_rerun(tmp_path, capsys):
+    client = FakeClient([_incident("inc-1", 5)])
+    provider = FakeProvider()
+    worker, _, log = _logged_worker(tmp_path, client, provider)
+
+    def broken_append(record):
+        raise OSError("disk full")
+
+    log.append = broken_append
+    worker.poll_once()
+    worker.poll_once()
+
+    assert provider.analyzed == ["inc-1"]
+    err = capsys.readouterr().err
+    assert '"incident_id":"inc-1"' in err and '"attempts"' in err
+
+
+def test_a_secret_in_the_stored_evidence_never_reaches_the_decision_log_file(tmp_path):
+    """The log stores the allowlisted request -- what the provider saw --
+    never detection-engine's raw events. Checked against the file's raw
+    bytes, not a parsed view, so no field can hide it.
+    """
+    secret = "AKIAFAKEBANTISATSIM1"
+    event = _event("e1")
+    event["details"]["tool_output_tail"] = f"Secret: {secret}"
+    event["message"] = f"found {secret}"
+    client = FakeClient([_incident("inc-1", 5)], events={"e1": event})
+    worker, _, _ = _logged_worker(tmp_path, client)
+
+    worker.poll_once()
+
+    raw = (tmp_path / "decisions.db").read_bytes()
+    assert secret.encode() not in raw
+    assert b"tool_output_tail" not in raw

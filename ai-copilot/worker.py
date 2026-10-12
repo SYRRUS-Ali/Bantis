@@ -10,6 +10,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from converter import MissingEvidenceError, as_utc_datetime, build_copilot_request
+from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
+from decision_log import DecisionLog, DecisionRecord
 from detection_client import DetectionEngineClient, DetectionEngineError
 from models import CopilotResponse
 from providers.base import AIProvider
@@ -34,8 +36,10 @@ class CopilotWorker:
         on_result: ResultSink = print_result,
         start_from: datetime | None = None,
         lookback_seconds: int = DEFAULT_LOOKBACK_SECONDS,
+        decision_log: DecisionLog | None = None,
     ) -> None:
         self._client = client
+        self._decision_log = decision_log
         self._provider = provider
         self._on_result = on_result
         self._start = as_utc_datetime(start_from) if start_from else datetime.now(timezone.utc)
@@ -61,20 +65,26 @@ class CopilotWorker:
         results = []
         held_at: datetime | None = None
         for created_at, incident in pending:
-            response = self._analyze(incident)
-            if response is None:
-                held_at = created_at if held_at is None else held_at
-                continue
-            self._deliver(incident, response)
+            if self._already_logged(incident["incident_id"]):
+                record = None
+            else:
+                record = self._analyze(incident)
+                if record is None:
+                    held_at = created_at if held_at is None else held_at
+                    continue
+                self._record(incident, record)
+                results.append(record.response)
             self._processed[incident["incident_id"]] = created_at
             if held_at is None:
                 self._cursor = max(self._cursor, created_at)
-            results.append(response)
 
         self._forget_ids_older_than(self._cursor - self._lookback)
         return results
 
-    def _analyze(self, incident: dict) -> CopilotResponse | None:
+    def _already_logged(self, incident_id: str) -> bool:
+        return self._decision_log is not None and self._decision_log.has_incident(incident_id)
+
+    def _analyze(self, incident: dict) -> DecisionRecord | None:
         incident_id = incident["incident_id"]
         try:
             events = self._client.get_incident_events(incident_id)
@@ -82,20 +92,30 @@ class CopilotWorker:
             logger.warning("could not fetch events for %s, will retry next poll: %s", incident_id, exc)
             return None
 
+        request = None
         try:
-            return self._provider.analyze(build_copilot_request(incident, events))
+            request = build_copilot_request(incident, events)
+            return DecisionRecord.from_trace(incident_id, request, self._provider.analyze_traced(request))
         except MissingEvidenceError as exc:
-            return CopilotResponse.analysis_failed(incident_id, "none (not sent to a provider)", str(exc))
+            response = CopilotResponse.analysis_failed(incident_id, "none (not sent to a provider)", str(exc))
+            return DecisionRecord.without_provider_call(incident_id, None, response, "evidence incomplete; not sent to the AI")
         except Exception as exc:
             logger.exception("unexpected error analyzing %s", incident_id)
-            return CopilotResponse.analysis_failed(incident_id, "none (worker error)", f"{type(exc).__name__}: {exc}")
+            response = CopilotResponse.analysis_failed(incident_id, "none (worker error)", f"{type(exc).__name__}: {exc}")
+            return DecisionRecord.without_provider_call(incident_id, request, response, "worker error during analysis")
 
-    def _deliver(self, incident: dict, response: CopilotResponse) -> None:
+    def _record(self, incident: dict, record: DecisionRecord) -> None:
+        if self._decision_log is not None:
+            try:
+                self._decision_log.append(record)
+            except Exception:
+                logger.exception("decision log write failed for %s; record follows", record.incident_id)
+                print(record.model_dump_json(), file=sys.stderr, flush=True)
         try:
-            self._on_result(incident, response)
+            self._on_result(incident, record.response)
         except Exception:
             logger.exception("result sink failed for %s; analysis follows", incident["incident_id"])
-            print(response.model_dump_json(), file=sys.stderr, flush=True)
+            print(record.response.model_dump_json(), file=sys.stderr, flush=True)
 
     def _forget_ids_older_than(self, horizon: datetime) -> None:
         self._processed = {i: t for i, t in self._processed.items() if t >= horizon}
@@ -121,13 +141,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Also analyze incidents created at or after this ISO 8601 time (default: only ones created after startup).",
     )
     parser.add_argument("--once", action="store_true", help="Poll a single time and exit.")
+    parser.add_argument(
+        "--decision-log",
+        default=DEFAULT_DECISION_LOG_PATH,
+        help="SQLite file every analysis is recorded in (default: ai-copilot/decision_log.db, or $BANTIS_DECISION_LOG).",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
 
     from providers.claude import ClaudeProvider
 
-    worker = CopilotWorker(DetectionEngineClient(args.detection_engine_url), ClaudeProvider(), start_from=args.since)
+    worker = CopilotWorker(
+        DetectionEngineClient(args.detection_engine_url),
+        ClaudeProvider(),
+        start_from=args.since,
+        decision_log=DecisionLog(args.decision_log),
+    )
     if args.once:
         worker.poll_once()
     else:
