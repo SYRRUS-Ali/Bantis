@@ -21,3 +21,9 @@ class IncidentORM(Base):
     severity: Mapped[str] = mapped_column(String, index=True)
     confidence: Mapped[float] = mapped_column(Float)
     summary: Mapped[str] = mapped_column(String)
+
+class IncidentEventClaimORM(Base):
+    __tablename__ = "incident_event_claims"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, index=True)

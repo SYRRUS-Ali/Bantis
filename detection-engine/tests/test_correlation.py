@@ -464,3 +464,26 @@ def test_run_correlation_does_not_reprocess_already_correlated_events(db_session
     from app.incident_models import IncidentORM
 
     assert db_session.query(IncidentORM).count() == 1
+
+def test_run_correlation_records_a_claim_for_every_correlated_event(db_session):
+    from app.incident_models import IncidentEventClaimORM
+
+    db_session.add(_event("e1", "attack-sim", "attack_scenario_run", 0))
+    db_session.add(_event("e2", "attack-sim", "attack_scenario_run", 30))
+    db_session.commit()
+
+    [incident] = run_correlation(db_session)
+
+    claims = {c.event_id: c.incident_id for c in db_session.query(IncidentEventClaimORM).all()}
+    assert claims == {"e1": incident.incident_id, "e2": incident.incident_id}
+
+
+def test_an_event_already_claimed_is_never_correlated_again(db_session):
+    from app.incident_models import IncidentEventClaimORM
+
+    db_session.add(_event("e1", "attack-sim", "attack_scenario_run", 0))
+    db_session.add(_event("e2", "attack-sim", "attack_scenario_run", 30))
+    db_session.add(IncidentEventClaimORM(event_id="e1", incident_id="claimed-elsewhere"))
+    db_session.commit()
+
+    assert run_correlation(db_session) == []

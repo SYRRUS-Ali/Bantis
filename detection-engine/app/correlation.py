@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.event_models import EventORM
-from app.incident_models import IncidentORM
+from app.incident_models import IncidentEventClaimORM, IncidentORM
 
 SAME_SOURCE_WINDOW_SECONDS = 60
 COMPOSITE_WINDOW_SECONDS = 300
@@ -201,10 +202,14 @@ def correlate(events: list[EventORM]) -> list[IncidentORM]:
     return incidents
 
 
-def run_correlation(session: Session) -> list[IncidentORM]:
+_MAX_CORRELATION_ATTEMPTS = 5
+
+
+def _correlate_unclaimed(session: Session) -> list[IncidentORM]:
     already_correlated: set[str] = set()
     for incident in session.query(IncidentORM).all():
         already_correlated.update(incident.correlated_event_ids or [])
+    already_correlated.update(event_id for (event_id,) in session.query(IncidentEventClaimORM.event_id))
 
     events = [
         event
@@ -215,6 +220,18 @@ def run_correlation(session: Session) -> list[IncidentORM]:
     new_incidents = correlate(events)
     for incident in new_incidents:
         session.add(incident)
+        for event_id in incident.correlated_event_ids:
+            session.add(IncidentEventClaimORM(event_id=event_id, incident_id=incident.incident_id))
     session.commit()
-
     return new_incidents
+
+
+def run_correlation(session: Session) -> list[IncidentORM]:
+    for attempt in range(1, _MAX_CORRELATION_ATTEMPTS + 1):
+        try:
+            return _correlate_unclaimed(session)
+        except IntegrityError:
+            session.rollback()
+            if attempt == _MAX_CORRELATION_ATTEMPTS:
+                raise
+    return []
