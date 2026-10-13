@@ -29,7 +29,18 @@ CREATE TABLE IF NOT EXISTS decisions (
     record_hash  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_incident ON decisions (incident_id);
+CREATE TABLE IF NOT EXISTS claims (
+    incident_id  TEXT PRIMARY KEY,
+    owner        TEXT NOT NULL,
+    claimed_at   TEXT NOT NULL
+);
 """
+
+DEFAULT_CLAIM_LEASE_SECONDS = 15 * 60
+SKIPPED = "skipped"
+
+class DuplicateDecisionError(RuntimeError):
+    pass
 
 
 class DecisionRecord(BaseModel):
@@ -41,8 +52,12 @@ class DecisionRecord(BaseModel):
     system_prompt: str | None = None
     request: CopilotRequest | None = None
     attempts: list[AttemptRecord] = Field(default_factory=list)
-    response: CopilotResponse
+    response: CopilotResponse | None = None
     note: str | None = None
+
+    @classmethod
+    def skipped(cls, incident_id: str, reason: str) -> DecisionRecord:
+        return cls(incident_id=incident_id, outcome=SKIPPED, model="none", note=reason)
 
     @classmethod
     def from_trace(cls, incident_id: str, request: CopilotRequest | None, trace: AnalysisTrace) -> DecisionRecord:
@@ -94,6 +109,10 @@ class DecisionLog:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM decisions WHERE incident_id = ? LIMIT 1", (record.incident_id,)
+            ).fetchone():
+                raise DuplicateDecisionError(f"incident {record.incident_id!r} already has a recorded decision")
             row = connection.execute("SELECT record_hash FROM decisions ORDER BY seq DESC LIMIT 1").fetchone()
             prev_hash = row[0] if row else GENESIS_HASH
             record_hash = _hash(prev_hash, record_json)
@@ -129,6 +148,42 @@ class DecisionLog:
             return connection.execute(
                 "SELECT 1 FROM decisions WHERE incident_id = ? LIMIT 1", (incident_id,)
             ).fetchone() is not None
+
+    def try_claim(self, incident_id: str, owner: str, lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS) -> bool:
+        now = datetime.now(timezone.utc)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM decisions WHERE incident_id = ? LIMIT 1", (incident_id,)).fetchone():
+                connection.execute("ROLLBACK")
+                return False
+            row = connection.execute("SELECT owner, claimed_at FROM claims WHERE incident_id = ?", (incident_id,)).fetchone()
+            if row:
+                holder, claimed_at = row
+                still_held = (now - datetime.fromisoformat(claimed_at)).total_seconds() < lease_seconds
+                if holder != owner and still_held:
+                    connection.execute("ROLLBACK")
+                    return False
+            connection.execute(
+                "INSERT INTO claims (incident_id, owner, claimed_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(incident_id) DO UPDATE SET owner = excluded.owner, claimed_at = excluded.claimed_at",
+                (incident_id, owner, now.isoformat()),
+            )
+            connection.execute("COMMIT")
+            return True
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def count_analyses_since(self, since: datetime) -> int:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT record_json FROM decisions WHERE recorded_at >= ?", (since.astimezone(timezone.utc).isoformat(),)
+            ).fetchall()
+        return sum(1 for (body,) in rows if json.loads(body).get("attempts"))
 
     def verify(self) -> list[str]:
         problems = []

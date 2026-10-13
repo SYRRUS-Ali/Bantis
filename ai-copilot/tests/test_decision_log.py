@@ -235,3 +235,57 @@ def test_cli_verify_exits_nonzero_when_tampered(tmp_path, capsys):
 
     assert main(["--path", str(path), "verify"]) == 1
     assert "modified" in capsys.readouterr().out
+
+# ---- Claims and duplicates ---------------------------------------------------
+
+def test_a_second_decision_for_the_same_incident_is_refused(log):
+    from decision_log import DuplicateDecisionError
+
+    log.append(_record("inc-1"))
+
+    with pytest.raises(DuplicateDecisionError):
+        log.append(_record("inc-1"))
+    assert len(log.for_incident("inc-1")) == 1
+    assert log.verify() == []
+
+
+def test_only_one_owner_can_claim_an_incident(log):
+    assert log.try_claim("inc-1", "worker-a") is True
+    assert log.try_claim("inc-1", "worker-b") is False
+    assert log.try_claim("inc-1", "worker-a") is True
+
+
+def test_an_incident_with_a_decision_cannot_be_claimed(log):
+    log.append(_record("inc-1"))
+
+    assert log.try_claim("inc-1", "worker-a") is False
+
+
+def test_an_expired_claim_can_be_taken_over(log):
+    assert log.try_claim("inc-1", "crashed-worker") is True
+
+    assert log.try_claim("inc-1", "worker-b", lease_seconds=3600) is False
+    assert log.try_claim("inc-1", "worker-b", lease_seconds=0) is True
+
+
+def test_count_analyses_since_counts_only_records_with_model_calls(log):
+    from decision_log import DecisionRecord
+
+    log.append(_record("analyzed"))
+    log.append(DecisionRecord.skipped("skipped", "not correlated"))
+    no_call = CopilotResponse.analysis_failed("missing", "none (not sent to a provider)", "events missing")
+    log.append(DecisionRecord.without_provider_call("missing", None, no_call, "evidence incomplete"))
+
+    assert log.count_analyses_since(datetime(2000, 1, 1, tzinfo=timezone.utc)) == 1
+    assert log.count_analyses_since(datetime(2999, 1, 1, tzinfo=timezone.utc)) == 0
+
+
+def test_cli_show_handles_a_skipped_decision(tmp_path, capsys):
+    from decision_log import DecisionRecord
+
+    path = tmp_path / "decisions.db"
+    DecisionLog(path).append(DecisionRecord.skipped("inc-1", "not correlated: 1 event(s)"))
+
+    assert main(["--path", str(path), "show", "inc-1"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["record"]["outcome"] == "skipped" and shown["record"]["response"] is None
