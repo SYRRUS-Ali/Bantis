@@ -21,7 +21,8 @@ ai-copilot/
 ├── parser.py              # parse_model_output() — model text → validated CopilotResponse (provider-agnostic)
 ├── detection_client.py    # read-only HTTP client for detection-engine's incidents API
 ├── worker.py              # polls for new incidents and analyzes each one automatically
-├── decision_log.py        # append-only, hash-chained record of every analysis (+ show/verify CLI)
+├── decision_log.py        # append-only, hash-chained record of every analysis and follow-up (+ show/verify CLI)
+├── api.py                 # authenticated HTTP API for follow-up questions ("Ask the Copilot")
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -33,6 +34,7 @@ ai-copilot/
 │   ├── test_parser.py
 │   ├── test_worker.py
 │   ├── test_decision_log.py
+│   ├── test_followup_api.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -186,15 +188,78 @@ python3 decision_log.py show <incident_id>   # every decision for an incident, w
 python3 decision_log.py verify               # integrity check; exit 1 if altered
 ```
 
+### Ask the Copilot: follow-up questions (`api.py`)
+
+An HTTP API for asking follow-up questions about an incident the
+Copilot already analyzed:
+
+| Route | |
+|---|---|
+| `POST /incidents/{id}/questions` | `{"question": "..."}` → `201` with the answer |
+| `GET /incidents/{id}/questions` | every answered question for the incident, in order |
+| `GET /health` | liveness, no token |
+
+Every question is a paid model call, so this API is locked down from the
+start, unlike detection-engine's:
+
+- **Bearer token required** (`COPILOT_API_TOKEN`, at least 16
+  characters; the server won't start without one), compared in constant
+  time. It binds to `127.0.0.1` by default, and warns if told to listen
+  elsewhere, since over plain HTTP the token travels in cleartext.
+- **Grounded only in the decision log.** The model sees the incident's
+  recorded, allowlisted request and its recorded analysis — never
+  detection-engine's raw events — so asking can't widen what reaches the
+  AI provider. A skipped incident (no recorded request) gets `409`
+  rather than an answer invented from nothing.
+- **Evidence is untrusted data.** Anyone can post events, so an evidence
+  field is attacker-controlled text. It goes inside an
+  `<incident_data>` block the model is told to treat as data, never
+  instructions, with `<`/`>` escaped so a field can't close the block
+  early. That escape was a real hole caught while writing the tests: a
+  `</incident_data>` inside an `artifact` used to break out of the block.
+  Delimiting reduces prompt injection; it doesn't make it impossible.
+- **Answers explain, they don't act.** An answer is plain text with no
+  action field, and asking never changes the recorded decision or its
+  proposed action.
+- **No credentials in questions.** A question that looks like it contains
+  an AWS key, private key, GitHub token or Anthropic key is refused
+  (`422`) before anything is sent — the threat model's "no secrets to the
+  AI provider" applies to operator input too. Pattern-based and
+  best-effort, not a guarantee.
+- **Bounded cost.** Questions are capped at 2000 characters; only the last
+  5 Q&A turns are sent as context; at most 60 questions per rolling hour
+  (`--max-questions-per-hour`, `--no-rate-limit`), counted from the
+  decision log, so the cap survives restarts.
+- **Audited.** Every question and answer — failures included, with the
+  exact prompt, raw output and token usage — goes into the decision log's
+  `followups` table, its own append-only hash chain. `decision_log.py
+  verify` checks it alongside the decisions, and `show` prints both.
+
+```bash
+export COPILOT_API_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 api.py                                   # http://127.0.0.1:8100
+curl -X POST http://127.0.0.1:8100/incidents/<incident_id>/questions \
+     -H "Authorization: Bearer $COPILOT_API_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"question": "Which event came first, and why does that matter?"}'
+```
+
 **Not built yet** (later Sprint 4 items): a token-budget guard (token
-usage is recorded per attempt, ready for it — the rate limit above
-counts incidents, not tokens); and the "ask a follow-up question"
-endpoint. A skipped incident stays skipped: lowering
-`--min-correlated-events` later doesn't re-evaluate incidents already
-recorded as skipped. Nothing reads the decision log over
-HTTP yet — the dashboard will need that. `run_correlation()` itself is
-still not automatic in detection-engine, so an incident only exists for
-the worker to find once something has called it.
+usage is recorded per attempt for analyses and follow-ups alike, ready
+for it — both rate limits count requests, not tokens). A skipped
+incident stays skipped: lowering `--min-correlated-events` later doesn't
+re-evaluate incidents already recorded as skipped. The decision log's
+analyses themselves aren't served over HTTP yet — only follow-ups are —
+and the dashboard will need that. `run_correlation()` itself is still
+not automatic in detection-engine, so an incident only exists for the
+worker to find once something has called it.
+
+**Known gap:** the *initial* analysis prompt (the worker's) doesn't yet
+use the same `<incident_data>` delimiting and untrusted-data instruction
+as follow-ups. Its output is constrained to the validated action enum, so
+injected text can't produce an executable action, but it could still try
+to steer which recommendation is made. Bringing the same protection to it
+is the obvious next fix.
 
 ### Validation and retries
 

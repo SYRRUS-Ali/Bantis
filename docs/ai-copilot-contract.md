@@ -219,9 +219,12 @@ and more dangerous claim.
 
 ## Open questions and explicit non-goals
 
-- **Multi-turn follow-up questions** ("Ask the copilot" against an
-  existing incident) are a separate later Sprint 4 item — this contract
-  covers only the initial analysis call, not a conversation.
+- **Follow-up questions** ("Ask the Copilot" against an analyzed
+  incident) are built on this contract rather than extending it: they
+  reuse the stored, allowlisted `CopilotRequest` and recorded analysis as
+  their only context, and their answers are plain text with no action
+  field — see `ai-copilot/README.md#ask-the-copilot-follow-up-questions-apipy`.
+  This contract still covers only the initial analysis call.
 - **The auto-execution whitelist** is explicitly deferred to ADR 0004's
   own "later, separately-reviewed decision" — not designed here, and no
   v1 action type is executable in the first place.
