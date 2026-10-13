@@ -192,10 +192,14 @@ count and the last validation error as the reason.
 3. **M4's confidence never overwrites M3's.** `IncidentORM.confidence`
    (the rule-based value) is immutable from the copilot's perspective;
    `CopilotResponse.confidence` is a separate value, stored separately.
-4. **Idempotent per incident.** Calling the copilot twice on the same
-   `incident_id` must be safe — a design constraint for the throttling
-   work in a later Sprint 4 item, noted here as a dependency, not
-   implemented by this contract.
+4. **One analysis per incident.** An incident is sent to the model at
+   most once: workers claim it atomically in the decision log before
+   calling, and the log refuses a second decision for it. Which incidents
+   are sent at all (only correlated ones, a per-hour limit, most severe
+   first) is `ai-copilot`'s throttling policy — see `ai-copilot/README.md`.
+   An incident the policy doesn't send is recorded as `skipped`, never
+   as `analysis_failed`: not trying and trying-and-failing are different
+   facts for an operator.
 5. **Token-budget enforcement is out of scope for this contract** — a
    separate Sprint 4 item. This contract defines the shape of one call;
    it does not decide whether that call should happen.

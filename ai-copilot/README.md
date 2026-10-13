@@ -99,6 +99,43 @@ an incident:
   restarts and even when `--since` reaches back over it.
 - **Missing evidence** isn't sent to the AI at all — it's recorded as
   `analysis_failed` without a provider call.
+- **One worker per incident.** Before calling the model, a worker
+  atomically claims the incident in the decision log (`try_claim`, under
+  SQLite's write lock). Checking "not in the log yet" and then calling
+  was a race: two workers on one incident made 2 paid calls and wrote 2
+  decisions (reproduced, now a regression test with 4 workers). A
+  claim expires after 15 minutes, so a worker that crashes mid-analysis
+  doesn't block its incident forever. As a backstop, the log refuses a
+  second decision for the same incident outright.
+
+### Throttling: what gets sent to the AI
+
+Every incident costs up to three model calls, and `POST /events` is
+unauthenticated — so without limits, anyone who can reach
+detection-engine controls how much you spend. `ThrottlePolicy` decides
+what's worth a call:
+
+- **Only correlated incidents.** An incident built from fewer than 2
+  events (`--min-correlated-events`) isn't a correlation — today that's
+  Pattern 3, the single-event untrusted-registry pull. It's recorded in
+  the decision log as `skipped`, with the reason, and never sent. That's
+  a real trade-off: a high-severity registry pull no longer gets AI
+  analysis by default. `--min-correlated-events 1` sends everything.
+- **A rate limit.** At most 30 incidents sent per rolling hour
+  (`--max-analyses-per-hour`, `--no-rate-limit` to disable). The count
+  comes from the decision log, so it survives restarts and is shared by
+  every worker using the same log. Incidents over the limit are
+  **deferred**, not dropped — the cursor is held so they're analyzed once
+  budget frees up. Skips and decisions made without a model call don't
+  count against it.
+- **Most severe first.** When the limit cuts a poll short, the incidents
+  left waiting are the least severe ones. Without that, a flood of
+  low-severity incidents (anyone can post events) could spend the hour's
+  budget ahead of a critical one.
+
+The limit is soft across workers: two workers checking at the same
+moment can each take the last slot, so it can be exceeded by at most the
+number of workers sharing the log.
 
 Detection-engine is reached through `detection_client.py`, which uses
 `http.client` with the URL scheme checked up front, the same as the
@@ -149,9 +186,12 @@ python3 decision_log.py show <incident_id>   # every decision for an incident, w
 python3 decision_log.py verify               # integrity check; exit 1 if altered
 ```
 
-**Not built yet** (later Sprint 4 items): throttling; a token-budget
-guard (token usage is now recorded per attempt, ready for it); and the
-"ask a follow-up question" endpoint. Nothing reads the decision log over
+**Not built yet** (later Sprint 4 items): a token-budget guard (token
+usage is recorded per attempt, ready for it — the rate limit above
+counts incidents, not tokens); and the "ask a follow-up question"
+endpoint. A skipped incident stays skipped: lowering
+`--min-correlated-events` later doesn't re-evaluate incidents already
+recorded as skipped. Nothing reads the decision log over
 HTTP yet — the dashboard will need that. `run_correlation()` itself is
 still not automatic in detection-engine, so an incident only exists for
 the worker to find once something has called it.
@@ -265,8 +305,10 @@ python3 worker.py --since 2026-10-10T00:00:00Z --once                     # also
 ```
 
 Each analysis is printed to stdout as one JSON line (`{"incident": ...,
-"analysis": ...}`); logs go to stderr. Every new incident is one paid
-API call to your Anthropic account.
+"analysis": ...}`); logs go to stderr. Every analyzed incident is up to
+three paid API calls to your Anthropic account — see Throttling above
+for what's sent and how many per hour (`--min-correlated-events`,
+`--max-analyses-per-hour`, `--no-rate-limit`).
 
 ## Running the tests
 

@@ -312,6 +312,27 @@ reasoning about concurrency in the abstract:
    everywhere events are ordered for correlation, making the outcome a
    reproducible rule instead.
 
+**Concurrent correlation passes created duplicate incidents.** Found on
+2026-10-13 while hunting duplicate AI calls; the Sprint 3 closure had
+left this open as "not proven safe" after an inconclusive test. With a
+real file database, 4 concurrent `run_correlation()` passes over the same
+2 events created **2–4 copies of one incident**, each with its own
+`incident_id`. That's worse than an ordinary duplicate: nothing
+downstream that dedupes by incident ID — the AI Copilot included — could
+tell the copies were one incident, so each got its own paid analysis.
+**Fix:** a new `incident_event_claims` table, primary key `event_id`, is
+written in the same transaction as each incident. The database now
+enforces the invariant `correlate()` already assumed: an event belongs to
+at most one incident. The losing pass's commit fails on that key, and
+`run_correlation()` rolls back and re-correlates whatever is still
+unclaimed, which is usually nothing. This holds on SQLite and Postgres
+alike, with no application-level lock to get wrong. After the fix, the
+same reproduction gives exactly one incident, run after run
+(`tests/test_correlation_concurrency.py`, 6 passes × 5 rounds); removing
+the claim rows makes it fail. Databases created before this have no claim
+rows for existing incidents, so their events are still excluded through
+the incidents' own `correlated_event_ids`.
+
 ## Running the tests
 
 ```bash
