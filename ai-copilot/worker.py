@@ -5,13 +5,17 @@ import json
 import logging
 import os
 import sys
+import socket
 import threading
+import uuid
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from converter import MissingEvidenceError, as_utc_datetime, build_copilot_request
 from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
-from decision_log import DecisionLog, DecisionRecord
+from decision_log import DecisionLog, DecisionRecord, DuplicateDecisionError
 from detection_client import DetectionEngineClient, DetectionEngineError
 from models import CopilotResponse
 from providers.base import AIProvider
@@ -21,6 +25,21 @@ logger = logging.getLogger("ai_copilot.worker")
 DEFAULT_LOOKBACK_SECONDS = 60
 
 ResultSink = Callable[[dict, CopilotResponse], None]
+
+_SEVERITY_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
+_RATE_WINDOW = timedelta(hours=1)
+
+
+@dataclass(frozen=True)
+class ThrottlePolicy:
+    min_correlated_events: int = 2
+    max_analyses_per_hour: int | None = 30
+
+    def skip_reason(self, incident: dict) -> str | None:
+        count = len(incident.get("correlated_event_ids") or [])
+        if count < self.min_correlated_events:
+            return f"not correlated: {count} event(s), policy requires at least {self.min_correlated_events}"
+        return None
 
 
 def print_result(incident: dict, response: CopilotResponse) -> None:
@@ -37,9 +56,13 @@ class CopilotWorker:
         start_from: datetime | None = None,
         lookback_seconds: int = DEFAULT_LOOKBACK_SECONDS,
         decision_log: DecisionLog | None = None,
+        policy: ThrottlePolicy | None = None,
     ) -> None:
         self._client = client
         self._decision_log = decision_log
+        self._policy = policy or ThrottlePolicy()
+        self._owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._recent_analyses: deque[datetime] = deque()
         self._provider = provider
         self._on_result = on_result
         self._start = as_utc_datetime(start_from) if start_from else datetime.now(timezone.utc)
@@ -60,26 +83,76 @@ class CopilotWorker:
             if created_at < self._start or incident["incident_id"] in self._processed:
                 continue
             pending.append((created_at, incident))
-        pending.sort(key=lambda pair: (pair[0], pair[1]["incident_id"]))
+        pending.sort(
+            key=lambda pair: (-_SEVERITY_RANK.get(pair[1].get("severity"), -1), pair[0], pair[1]["incident_id"])
+        )
 
         results = []
-        held_at: datetime | None = None
+        deferred: list[datetime] = []
+        newest_done = self._cursor
+        throttled = 0
         for created_at, incident in pending:
-            if self._already_logged(incident["incident_id"]):
-                record = None
+            incident_id = incident["incident_id"]
+            if self._already_logged(incident_id):
+                pass
+            elif reason := self._policy.skip_reason(incident):
+                self._record_skip(incident_id, reason)
+            elif not self._within_rate_limit():
+                throttled += 1
+                deferred.append(created_at)
+                continue
+            elif not self._claim(incident_id):
+                deferred.append(created_at)
+                continue
             else:
                 record = self._analyze(incident)
                 if record is None:
-                    held_at = created_at if held_at is None else held_at
+                    deferred.append(created_at)
                     continue
                 self._record(incident, record)
-                results.append(record.response)
-            self._processed[incident["incident_id"]] = created_at
-            if held_at is None:
-                self._cursor = max(self._cursor, created_at)
+                if record.attempts:
+                    self._recent_analyses.append(datetime.now(timezone.utc))
+                if record.response is not None:
+                    results.append(record.response)
+            self._processed[incident_id] = created_at
+            newest_done = max(newest_done, created_at)
 
+        if throttled:
+            logger.warning(
+                "rate limit of %s analyses/hour reached; %d incident(s) deferred to a later poll",
+                self._policy.max_analyses_per_hour,
+                throttled,
+            )
+        self._cursor = min([newest_done, *deferred])
         self._forget_ids_older_than(self._cursor - self._lookback)
         return results
+
+    def _within_rate_limit(self) -> bool:
+        limit = self._policy.max_analyses_per_hour
+        if limit is None:
+            return True
+        window_start = datetime.now(timezone.utc) - _RATE_WINDOW
+        if self._decision_log is not None:
+            return self._decision_log.count_analyses_since(window_start) < limit
+        while self._recent_analyses and self._recent_analyses[0] < window_start:
+            self._recent_analyses.popleft()
+        return len(self._recent_analyses) < limit
+
+    def _claim(self, incident_id: str) -> bool:
+        if self._decision_log is None:
+            return True
+        return self._decision_log.try_claim(incident_id, self._owner)
+
+    def _record_skip(self, incident_id: str, reason: str) -> None:
+        logger.info("not sending %s to the AI: %s", incident_id, reason)
+        if self._decision_log is None:
+            return
+        try:
+            self._decision_log.append(DecisionRecord.skipped(incident_id, reason))
+        except DuplicateDecisionError:
+            pass
+        except Exception:
+            logger.exception("decision log write failed for skipped incident %s", incident_id)
 
     def _already_logged(self, incident_id: str) -> bool:
         return self._decision_log is not None and self._decision_log.has_incident(incident_id)
@@ -108,6 +181,11 @@ class CopilotWorker:
         if self._decision_log is not None:
             try:
                 self._decision_log.append(record)
+            except DuplicateDecisionError:
+                # Claims should make this unreachable; if it happens, a
+                # second paid call already did, so say so loudly.
+                logger.error("duplicate analysis of %s: a decision was already recorded; record follows", record.incident_id)
+                print(record.model_dump_json(), file=sys.stderr, flush=True)
             except Exception:
                 logger.exception("decision log write failed for %s; record follows", record.incident_id)
                 print(record.model_dump_json(), file=sys.stderr, flush=True)
@@ -142,6 +220,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--once", action="store_true", help="Poll a single time and exit.")
     parser.add_argument(
+        "--min-correlated-events",
+        type=int,
+        default=ThrottlePolicy.min_correlated_events,
+        help="Skip incidents built from fewer events than this (default 2; 1 sends every incident).",
+    )
+    parser.add_argument(
+        "--max-analyses-per-hour",
+        type=int,
+        default=ThrottlePolicy.max_analyses_per_hour,
+        help="Incidents sent to the model per rolling hour, across every worker sharing the log (default 30).",
+    )
+    parser.add_argument("--no-rate-limit", action="store_true", help="Disable the hourly limit.")
+    parser.add_argument(
         "--decision-log",
         default=DEFAULT_DECISION_LOG_PATH,
         help="SQLite file every analysis is recorded in (default: ai-copilot/decision_log.db, or $BANTIS_DECISION_LOG).",
@@ -157,6 +248,10 @@ def main(argv: list[str] | None = None) -> int:
         ClaudeProvider(),
         start_from=args.since,
         decision_log=DecisionLog(args.decision_log),
+        policy=ThrottlePolicy(
+            min_correlated_events=args.min_correlated_events,
+            max_analyses_per_hour=None if args.no_rate_limit else args.max_analyses_per_hour,
+        ),
     )
     if args.once:
         worker.poll_once()

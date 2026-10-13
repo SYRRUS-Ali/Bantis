@@ -15,7 +15,7 @@ def _at(seconds: float) -> str:
     return (_START + timedelta(seconds=seconds)).replace(tzinfo=None).isoformat()
 
 
-def _incident(incident_id: str, seconds: float, event_ids=("e1",)) -> dict:
+def _incident(incident_id: str, seconds: float, event_ids=("e1", "e2")) -> dict:
     return {
         "incident_id": incident_id,
         "created_at": _at(seconds),
@@ -46,7 +46,7 @@ def _event(event_id: str) -> dict:
 class FakeClient:
     def __init__(self, incidents=(), events=None):
         self.incidents = list(incidents)
-        self.events = events if events is not None else {"e1": _event("e1")}
+        self.events = events if events is not None else {"e1": _event("e1"), "e2": _event("e2")}
         self.since_queries: list[datetime] = []
         self.fail_listing = False
         self.fail_events_for: set[str] = set()
@@ -358,11 +358,141 @@ def test_a_secret_in_the_stored_evidence_never_reaches_the_decision_log_file(tmp
     event = _event("e1")
     event["details"]["tool_output_tail"] = f"Secret: {secret}"
     event["message"] = f"found {secret}"
-    client = FakeClient([_incident("inc-1", 5)], events={"e1": event})
-    worker, _, _ = _logged_worker(tmp_path, client)
+    client = FakeClient([_incident("inc-1", 5)], events={"e1": event, "e2": _event("e2")})
+    worker, _, log = _logged_worker(tmp_path, client)
 
     worker.poll_once()
 
+    [stored] = log.for_incident("inc-1")
+    assert [e.event_id for e in stored.record.request.evidence_timeline] == ["e1", "e2"]
     raw = (tmp_path / "decisions.db").read_bytes()
     assert secret.encode() not in raw
     assert b"tool_output_tail" not in raw
+
+# ---- Throttling --------------------------------------------------------------
+
+def _policy(**overrides):
+    from worker import ThrottlePolicy
+
+    return ThrottlePolicy(**overrides)
+
+
+def test_a_single_event_incident_is_skipped_and_recorded_not_sent(tmp_path):
+    client = FakeClient([_incident("single", 5, event_ids=("e1",))])
+    provider = FakeProvider()
+    worker, delivered, log = _logged_worker(tmp_path, client, provider)
+
+    worker.poll_once()
+    worker.poll_once()
+
+    assert provider.analyzed == []
+    assert delivered == []
+    [stored] = log.for_incident("single")
+    assert stored.record.outcome == "skipped"
+    assert stored.record.response is None
+    assert "not correlated: 1 event(s)" in stored.record.note
+
+
+def test_the_correlation_threshold_is_configurable(tmp_path):
+    client = FakeClient([_incident("single", 5, event_ids=("e1",))])
+    provider = FakeProvider()
+    worker, _, _ = _logged_worker(tmp_path, client, provider, policy=_policy(min_correlated_events=1))
+
+    worker.poll_once()
+
+    assert provider.analyzed == ["single"]
+
+
+def test_the_rate_limit_defers_rather_than_drops(tmp_path):
+    client = FakeClient([_incident(f"inc-{n}", n) for n in range(1, 5)])
+    provider = FakeProvider()
+    worker, _, _ = _logged_worker(tmp_path, client, provider, policy=_policy(max_analyses_per_hour=2))
+
+    worker.poll_once()
+    worker.poll_once()
+    assert len(provider.analyzed) == 2  # the limit holds across polls
+
+    worker._policy = _policy(max_analyses_per_hour=None)  # budget frees up
+    worker.poll_once()
+    assert sorted(provider.analyzed) == ["inc-1", "inc-2", "inc-3", "inc-4"]  # nothing was lost
+
+
+def test_the_rate_limit_is_shared_through_the_log_and_survives_a_restart(tmp_path):
+    client = FakeClient([_incident(f"inc-{n}", n) for n in range(1, 5)])
+    first_provider, second_provider = FakeProvider(), FakeProvider()
+    first, _, _ = _logged_worker(tmp_path, client, first_provider, policy=_policy(max_analyses_per_hour=2))
+    first.poll_once()
+
+    second, _, _ = _logged_worker(tmp_path, client, second_provider, policy=_policy(max_analyses_per_hour=2))
+    second.poll_once()
+
+    assert len(first_provider.analyzed) == 2
+    assert second_provider.analyzed == []
+
+
+def test_only_real_model_calls_count_against_the_rate_limit(tmp_path):
+    client = FakeClient(
+        [
+            _incident("single", 1, event_ids=("e1",)),  # skipped: no call
+            _incident("missing", 2, event_ids=("e1", "gone")),  # missing evidence: no call
+            _incident("real", 3),
+        ]
+    )
+    provider = FakeProvider()
+    worker, _, _ = _logged_worker(tmp_path, client, provider, policy=_policy(max_analyses_per_hour=1))
+
+    worker.poll_once()
+
+    assert provider.analyzed == ["real"]
+
+
+def test_under_the_rate_limit_the_most_severe_incident_goes_first(tmp_path):
+    flood = dict(_incident("flood", 1), severity="medium")
+    critical = dict(_incident("critical", 9), severity="critical")
+    client = FakeClient([flood, critical])
+    provider = FakeProvider()
+    worker, _, _ = _logged_worker(tmp_path, client, provider, policy=_policy(max_analyses_per_hour=1))
+
+    worker.poll_once()
+
+    assert provider.analyzed == ["critical"]
+
+
+# ---- Duplicate calls ---------------------------------------------------------
+
+def test_two_workers_never_both_pay_for_the_same_incident(tmp_path):
+    import threading
+    import time
+
+    from decision_log import DecisionLog
+
+    class SlowProvider(FakeProvider):
+        def analyze_traced(self, request):
+            time.sleep(0.3)
+            return super().analyze_traced(request)
+
+    path = tmp_path / "decisions.db"
+    client = FakeClient([_incident("inc-1", 5)])
+    providers = [SlowProvider() for _ in range(4)]
+    workers = [
+        CopilotWorker(client, p, on_result=lambda i, r: None, start_from=_START, decision_log=DecisionLog(path))
+        for p in providers
+    ]
+    barrier = threading.Barrier(len(workers))
+
+    def poll(worker):
+        barrier.wait()
+        worker.poll_once()
+
+    threads = [threading.Thread(target=poll, args=(w,)) for w in workers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(len(p.analyzed) for p in providers) == 1
+    assert len(DecisionLog(path).for_incident("inc-1")) == 1
+
+    for w in workers:
+        w.poll_once()
+    assert sum(len(p.analyzed) for p in providers) == 1
