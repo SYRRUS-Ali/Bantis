@@ -29,6 +29,16 @@ CREATE TABLE IF NOT EXISTS decisions (
     record_hash  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_incident ON decisions (incident_id);
+CREATE TABLE IF NOT EXISTS followups (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    followup_id  TEXT NOT NULL UNIQUE,
+    incident_id  TEXT NOT NULL,
+    asked_at     TEXT NOT NULL,
+    record_json  TEXT NOT NULL,
+    prev_hash    TEXT NOT NULL,
+    record_hash  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS followups_incident ON followups (incident_id);
 CREATE TABLE IF NOT EXISTS claims (
     incident_id  TEXT PRIMARY KEY,
     owner        TEXT NOT NULL,
@@ -81,6 +91,18 @@ class DecisionRecord(BaseModel):
             response=response,
             note=note,
         )
+
+
+class FollowupRecord(BaseModel):
+    followup_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    incident_id: str
+    asked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    question: str
+    answer: str | None = None
+    error: str | None = None
+    model: str
+    system_prompt: str | None = None
+    attempts: list[AttemptRecord] = Field(default_factory=list)
 
 
 class StoredDecision(BaseModel):
@@ -185,20 +207,59 @@ class DecisionLog:
             ).fetchall()
         return sum(1 for (body,) in rows if json.loads(body).get("attempts"))
 
-    def verify(self) -> list[str]:
+    def append_followup(self, record: FollowupRecord) -> FollowupRecord:
+        record_json = record.model_dump_json()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT record_hash FROM followups ORDER BY seq DESC LIMIT 1").fetchone()
+            prev_hash = row[0] if row else GENESIS_HASH
+            connection.execute(
+                "INSERT INTO followups (followup_id, incident_id, asked_at, record_json, prev_hash, record_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (record.followup_id, record.incident_id, record.asked_at.isoformat(), record_json, prev_hash,
+                 _hash(prev_hash, record_json)),
+            )
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return record
+
+    def followups_for(self, incident_id: str) -> list[FollowupRecord]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT record_json FROM followups WHERE incident_id = ? ORDER BY seq", (incident_id,)
+            ).fetchall()
+        return [FollowupRecord.model_validate_json(body) for (body,) in rows]
+
+    def count_followups_since(self, since: datetime) -> int:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT record_json FROM followups WHERE asked_at >= ?", (since.astimezone(timezone.utc).isoformat(),)
+            ).fetchall()
+        return sum(1 for (body,) in rows if json.loads(body).get("attempts"))
+
+    def _verify_chain(self, table: str, label: str) -> list[str]:
         problems = []
         expected_prev = GENESIS_HASH
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT seq, record_json, prev_hash, record_hash FROM decisions ORDER BY seq"
+                f"SELECT seq, record_json, prev_hash, record_hash FROM {table} ORDER BY seq"
             ).fetchall()
         for seq, record_json, prev_hash, record_hash in rows:
             if prev_hash != expected_prev:
-                problems.append(f"seq {seq}: prev_hash doesn't match the record before it (a record was removed or reordered)")
+                problems.append(f"{label}seq {seq}: prev_hash doesn't match the record before it (a record was removed or reordered)")
             if _hash(prev_hash, record_json) != record_hash:
-                problems.append(f"seq {seq}: content doesn't match its hash (the record was modified)")
+                problems.append(f"{label}seq {seq}: content doesn't match its hash (the record was modified)")
             expected_prev = record_hash
         return problems
+
+    def verify(self) -> list[str]:
+        return self._verify_chain("decisions", "") + self._verify_chain("followups", "followups ")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for decision in decisions:
             print(json.dumps(json.loads(decision.model_dump_json()), indent=2))
+        for followup in log.followups_for(args.incident_id):
+            print(json.dumps({"followup": json.loads(followup.model_dump_json())}, indent=2))
         return 0
 
     problems = log.verify()
