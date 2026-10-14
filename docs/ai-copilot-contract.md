@@ -200,9 +200,11 @@ count and the last validation error as the reason.
    An incident the policy doesn't send is recorded as `skipped`, never
    as `analysis_failed`: not trying and trying-and-failing are different
    facts for an operator.
-5. **Token-budget enforcement is out of scope for this contract** — a
-   separate Sprint 4 item. This contract defines the shape of one call;
-   it does not decide whether that call should happen.
+5. **Spending is capped per day.** Whether a call happens at all is
+   decided outside this contract, by ai-copilot's daily token budget
+   (`ai-copilot/budget.py`): one allowance per UTC day shared by
+   analyses and follow-up questions, read back from the decision log.
+   This contract still only defines the shape of one call.
 
 ## Error cases and failure semantics
 
@@ -228,8 +230,6 @@ and more dangerous claim.
 - **The auto-execution whitelist** is explicitly deferred to ADR 0004's
   own "later, separately-reviewed decision" — not designed here, and no
   v1 action type is executable in the first place.
-- **Token-budget/cost enforcement** is a separate later Sprint 4 item;
-  this contract assumes the call happens and defines what it looks like.
 - **Retry count (2) is a starting point, not tuned** — revisit once
   real provider failure rates are observed, rather than guessing further
   now.

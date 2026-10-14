@@ -22,7 +22,8 @@ ai-copilot/
 ├── detection_client.py    # read-only HTTP client for detection-engine's incidents API
 ├── worker.py              # polls for new incidents and analyzes each one automatically
 ├── decision_log.py        # append-only, hash-chained record of every analysis and follow-up (+ show/verify CLI)
-├── api.py                 # authenticated HTTP API for follow-up questions ("Ask the Copilot")
+├── api.py                 # authenticated HTTP API for follow-up questions ("Ask the Copilot") and /usage
+├── budget.py              # daily token budget shared by the worker and the API
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -35,6 +36,7 @@ ai-copilot/
 │   ├── test_worker.py
 │   ├── test_decision_log.py
 │   ├── test_followup_api.py
+│   ├── test_budget.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -244,10 +246,39 @@ curl -X POST http://127.0.0.1:8100/incidents/<incident_id>/questions \
      -d '{"question": "Which event came first, and why does that matter?"}'
 ```
 
-**Not built yet** (later Sprint 4 items): a token-budget guard (token
-usage is recorded per attempt for analyses and follow-ups alike, ready
-for it — both rate limits count requests, not tokens). A skipped
-incident stays skipped: lowering `--min-correlated-events` later doesn't
+### Daily token budget (`budget.py`)
+
+Every model call's token usage is recorded per attempt in the decision
+log — including rejected attempts, because a rejected reply was still
+billed. That record is what both tracking and the cap are built on:
+
+- **Tracking.** `python3 decision_log.py usage --days 7` prints calls,
+  input, output and total tokens per UTC day; the API's `GET /usage`
+  (token required) returns today's numbers against the budget, for a
+  dashboard.
+- **One daily cap for everything.** At most 500,000 tokens per UTC day
+  by default (`--max-tokens-per-day` on both `worker.py` and `api.py`,
+  `--no-token-budget` to disable), counting worker analyses and follow-up
+  questions together, since both bill the same account. It's read from
+  the decision log, so it survives restarts and every process sharing
+  the log draws on one allowance. Each process applies its own
+  configured limit to that shared usage, so give them the same number.
+- **Over budget means wait, not drop.** The worker defers incidents
+  until the budget resets at UTC midnight, logging when it will; the API
+  answers `429` with `Retry-After` set to the seconds left until midnight.
+  Nothing is lost.
+- **What it isn't: a hard cap.** A call's cost is only known once it
+  returns, so the guard checks before each analysis or question starts.
+  A process can overshoot by at most the one it already had in flight
+  (an analysis is up to 3 model calls). A test pins that bound so nobody
+  reads the limit as stricter than it is.
+
+The rate limits above count requests; this counts tokens. They work
+together: the rate limit stops a burst, and the budget stops slow,
+steady spending from adding up.
+
+**Still open:** a skipped incident stays skipped: lowering
+`--min-correlated-events` later doesn't
 re-evaluate incidents already recorded as skipped. The decision log's
 analyses themselves aren't served over HTTP yet — only follow-ups are —
 and the dashboard will need that. `run_correlation()` itself is still
@@ -373,7 +404,8 @@ Each analysis is printed to stdout as one JSON line (`{"incident": ...,
 "analysis": ...}`); logs go to stderr. Every analyzed incident is up to
 three paid API calls to your Anthropic account — see Throttling above
 for what's sent and how many per hour (`--min-correlated-events`,
-`--max-analyses-per-hour`, `--no-rate-limit`).
+`--max-analyses-per-hour`, `--no-rate-limit`), and Daily token budget for
+the per-day cap (`--max-tokens-per-day`, `--no-token-budget`).
 
 ## Running the tests
 
