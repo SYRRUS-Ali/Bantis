@@ -496,3 +496,76 @@ def test_two_workers_never_both_pay_for_the_same_incident(tmp_path):
     for w in workers:
         w.poll_once()
     assert sum(len(p.analyzed) for p in providers) == 1
+
+# ---- Daily token budget ------------------------------------------------------
+# FakeProvider's trace costs 160 tokens per analysis (120 input + 40 output
+# on its one billed attempt; the rejected first attempt has no usage).
+
+
+def _budget(log, limit):
+    from budget import TokenBudget
+
+    return TokenBudget(limit, log)
+
+
+def test_an_exhausted_budget_defers_incidents_rather_than_dropping_them(tmp_path):
+    from decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "decisions.db")
+    client = FakeClient([_incident(f"inc-{n}", n) for n in range(1, 5)])
+    provider = FakeProvider()
+    worker, _ = _worker(client, provider, decision_log=log, budget=_budget(log, 300))
+
+    worker.poll_once()
+    worker.poll_once()
+    analyzed_under_budget = list(provider.analyzed)
+
+    worker._budget = _budget(log, None)  # e.g. the next UTC day
+    worker.poll_once()
+
+    assert len(analyzed_under_budget) == 2
+    assert sorted(provider.analyzed) == ["inc-1", "inc-2", "inc-3", "inc-4"]
+
+
+def test_the_budget_can_be_overshot_by_at_most_one_analysis(tmp_path):
+    from decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "decisions.db")
+    client = FakeClient([_incident(f"inc-{n}", n) for n in range(1, 5)])
+    worker, _ = _worker(client, FakeProvider(), decision_log=log, budget=_budget(log, 300))
+
+    worker.poll_once()
+
+    used = _budget(log, 300).status().used.total_tokens
+    assert used == 320
+    assert used - 300 < 160
+
+
+def test_followup_spending_counts_against_the_worker_budget(tmp_path):
+    from decision_log import DecisionLog, FollowupRecord
+
+    log = DecisionLog(tmp_path / "decisions.db")
+    log.append_followup(
+        FollowupRecord(
+            incident_id="other", question="q", answer="a", model="m",
+            attempts=[AttemptRecord(number=1, raw_output="a", input_tokens=900, output_tokens=100)],
+        )
+    )
+    provider = FakeProvider()
+    worker, _ = _worker(FakeClient([_incident("inc-1", 5)]), provider, decision_log=log, budget=_budget(log, 1000))
+
+    worker.poll_once()
+
+    assert provider.analyzed == []
+
+
+def test_running_out_of_budget_is_logged_with_the_reset_time(tmp_path, caplog):
+    from decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "decisions.db")
+    worker, _ = _worker(FakeClient([_incident("a", 1), _incident("b", 2)]), FakeProvider(), decision_log=log, budget=_budget(log, 100))
+
+    worker.poll_once()
+
+    [message] = [r.getMessage() for r in caplog.records if "token budget" in r.getMessage()]
+    assert "daily token budget of 100 exhausted (160 used today); 1 incident(s) deferred until" in message

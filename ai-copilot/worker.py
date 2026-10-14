@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from budget import DEFAULT_MAX_TOKENS_PER_DAY, TokenBudget
 from converter import MissingEvidenceError, as_utc_datetime, build_copilot_request
 from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
 from decision_log import DecisionLog, DecisionRecord, DuplicateDecisionError
@@ -57,10 +58,12 @@ class CopilotWorker:
         lookback_seconds: int = DEFAULT_LOOKBACK_SECONDS,
         decision_log: DecisionLog | None = None,
         policy: ThrottlePolicy | None = None,
+        budget: TokenBudget | None = None,
     ) -> None:
         self._client = client
         self._decision_log = decision_log
         self._policy = policy or ThrottlePolicy()
+        self._budget = budget or TokenBudget(decision_log=decision_log)
         self._owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._recent_analyses: deque[datetime] = deque()
         self._provider = provider
@@ -91,12 +94,17 @@ class CopilotWorker:
         deferred: list[datetime] = []
         newest_done = self._cursor
         throttled = 0
+        over_budget = 0
         for created_at, incident in pending:
             incident_id = incident["incident_id"]
             if self._already_logged(incident_id):
                 pass
             elif reason := self._policy.skip_reason(incident):
                 self._record_skip(incident_id, reason)
+            elif self._budget.status().exhausted:
+                over_budget += 1
+                deferred.append(created_at)
+                continue
             elif not self._within_rate_limit():
                 throttled += 1
                 deferred.append(created_at)
@@ -110,6 +118,7 @@ class CopilotWorker:
                     deferred.append(created_at)
                     continue
                 self._record(incident, record)
+                self._budget.record(record.attempts)
                 if record.attempts:
                     self._recent_analyses.append(datetime.now(timezone.utc))
                 if record.response is not None:
@@ -117,6 +126,15 @@ class CopilotWorker:
             self._processed[incident_id] = created_at
             newest_done = max(newest_done, created_at)
 
+        if over_budget:
+            status = self._budget.status()
+            logger.warning(
+                "daily token budget of %s exhausted (%s used today); %d incident(s) deferred until %s",
+                f"{status.limit:,}",
+                f"{status.used.total_tokens:,}",
+                over_budget,
+                status.resets_at.isoformat(),
+            )
         if throttled:
             logger.warning(
                 "rate limit of %s analyses/hour reached; %d incident(s) deferred to a later poll",
@@ -233,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-rate-limit", action="store_true", help="Disable the hourly limit.")
     parser.add_argument(
+        "--max-tokens-per-day",
+        type=int,
+        default=DEFAULT_MAX_TOKENS_PER_DAY,
+        help="Daily token budget per UTC day, shared with the follow-up API through the decision log (default 500,000).",
+    )
+    parser.add_argument("--no-token-budget", action="store_true", help="Disable the daily token budget.")
+    parser.add_argument(
         "--decision-log",
         default=DEFAULT_DECISION_LOG_PATH,
         help="SQLite file every analysis is recorded in (default: ai-copilot/decision_log.db, or $BANTIS_DECISION_LOG).",
@@ -243,11 +268,13 @@ def main(argv: list[str] | None = None) -> int:
 
     from providers.claude import ClaudeProvider
 
+    decision_log = DecisionLog(args.decision_log)
     worker = CopilotWorker(
         DetectionEngineClient(args.detection_engine_url),
         ClaudeProvider(),
         start_from=args.since,
-        decision_log=DecisionLog(args.decision_log),
+        decision_log=decision_log,
+        budget=TokenBudget(None if args.no_token_budget else args.max_tokens_per_day, decision_log),
         policy=ThrottlePolicy(
             min_correlated_events=args.min_correlated_events,
             max_analyses_per_hour=None if args.no_rate_limit else args.max_analyses_per_hour,
