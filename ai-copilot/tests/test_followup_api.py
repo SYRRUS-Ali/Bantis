@@ -246,3 +246,66 @@ def test_a_provider_failure_is_502_and_still_recorded(log):
     [stored] = log.followups_for("inc-1")
     assert stored.answer is None and stored.error == "provider error: timed out"
     assert client.get("/incidents/inc-1/questions", headers=_AUTH).json() == []
+
+# ---- Daily token budget ------------------------------------------------------
+
+
+def _budget(log, limit, at=None):
+    from budget import TokenBudget
+
+    return TokenBudget(limit, log, (lambda: at) if at else TokenBudget.clock)
+
+
+def test_an_exhausted_budget_returns_429_until_utc_midnight(log, provider):
+    from datetime import timedelta
+
+    from decision_log import FollowupRecord
+
+    now = datetime.now(timezone.utc).replace(hour=23, minute=0, second=0, microsecond=0)
+    log.append_followup(
+        FollowupRecord(
+            incident_id="inc-1", asked_at=now - timedelta(minutes=5), question="q", answer="a", model="m",
+            attempts=[AttemptRecord(number=1, raw_output="a", input_tokens=900, output_tokens=100)],
+        )
+    )
+    client = TestClient(create_app(log, provider, _TOKEN, budget=_budget(log, 1000, at=now)))
+
+    response = _ask(client, "one more?")
+
+    assert response.status_code == 429
+    assert "daily token budget of 1,000 exhausted (1,000 used)" in response.json()["detail"]
+    assert response.headers["Retry-After"] == str(60 * 60 + 1)
+    assert provider.calls == []
+
+
+def test_worker_spending_counts_against_the_question_budget(log, provider):
+    """The decision log is shared: analyses and questions draw on one
+    daily allowance. The fixture's analysis cost nothing (no usage), so add
+    a costly one.
+    """
+    from decision_log import DecisionRecord as Record
+
+    response = CopilotResponse(
+        incident_id="inc-costly", reasoning="r", confidence=0.5,
+        proposed_action=ProposedAction(type="flag_for_review", description="d"), model="m", generated_at=_NOW,
+    )
+    trace = AnalysisTrace(response=response, attempts=[AttemptRecord(number=1, raw_output="{}", input_tokens=4000, output_tokens=1000)])
+    log.append(Record.from_trace("inc-costly", _request("inc-costly"), trace))
+    client = TestClient(create_app(log, provider, _TOKEN, budget=_budget(log, 5000)))
+
+    assert _ask(client, "why?").status_code == 429
+
+
+def test_usage_reports_todays_spend_against_the_budget(log, provider):
+    client = TestClient(create_app(log, provider, _TOKEN, budget=_budget(log, 10_000)))
+    _ask(client, "first")  # FakeAsker: 500 input + 40 output
+
+    body = client.get("/usage", headers=_AUTH).json()
+
+    assert (body["calls"], body["input_tokens"], body["output_tokens"], body["total_tokens"]) == (1, 500, 40, 540)
+    assert (body["limit"], body["remaining"]) == (10_000, 9_460)
+    assert body["day"] == datetime.now(timezone.utc).date().isoformat()
+
+
+def test_usage_requires_the_token(client):
+    assert client.get("/usage").status_code == 401

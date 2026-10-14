@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
+from budget import DEFAULT_MAX_TOKENS_PER_DAY, TokenBudget
 from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
 from decision_log import DecisionLog, FollowupRecord
 from providers.base import AIProvider
@@ -50,6 +51,17 @@ class QuestionIn(BaseModel):
         return value
 
 
+class UsageOut(BaseModel):
+    day: str
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    limit: int | None
+    remaining: int | None
+    resets_at: datetime
+
+
 class FollowupOut(BaseModel):
     followup_id: str
     incident_id: str
@@ -75,7 +87,9 @@ def create_app(
     provider: AIProvider,
     api_token: str,
     max_questions_per_hour: int | None = DEFAULT_MAX_QUESTIONS_PER_HOUR,
+    budget: TokenBudget | None = None,
 ) -> FastAPI:
+    budget = budget or TokenBudget(decision_log=decision_log)
     if not api_token or len(api_token) < MIN_TOKEN_LENGTH:
         raise ValueError(f"the API token must be at least {MIN_TOKEN_LENGTH} characters")
     expected_header = f"Bearer {api_token}".encode()
@@ -128,6 +142,19 @@ def create_app(
                     headers={"Retry-After": "60"},
                 )
 
+        spend = budget.status()
+        if spend.exhausted:
+            # Shared with the worker through the decision log: questions
+            # and analyses draw on the same daily allowance.
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"daily token budget of {spend.limit:,} exhausted ({spend.used.total_tokens:,} used); "
+                    f"resets at {spend.resets_at.isoformat()}"
+                ),
+                headers={"Retry-After": str(spend.seconds_until_reset)},
+            )
+
         history = [(f.question, f.answer) for f in decision_log.followups_for(incident_id) if f.answer]
         trace = provider.ask(record.request, record.response, history[-HISTORY_TURNS:], body.question)
 
@@ -158,6 +185,20 @@ def create_app(
         analyzed_decision(incident_id)
         return [_out(f) for f in decision_log.followups_for(incident_id) if f.answer is not None]
 
+    @app.get("/usage", response_model=UsageOut, dependencies=[Depends(require_token)])
+    def usage() -> UsageOut:
+        spend = budget.status()
+        return UsageOut(
+            day=spend.now.date().isoformat(),
+            calls=spend.used.calls,
+            input_tokens=spend.used.input_tokens,
+            output_tokens=spend.used.output_tokens,
+            total_tokens=spend.used.total_tokens,
+            limit=spend.limit,
+            remaining=spend.remaining,
+            resets_at=spend.resets_at,
+        )
+
     return app
 
 
@@ -177,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--decision-log", default=DEFAULT_DECISION_LOG_PATH)
     parser.add_argument("--max-questions-per-hour", type=int, default=DEFAULT_MAX_QUESTIONS_PER_HOUR)
     parser.add_argument("--no-rate-limit", action="store_true")
+    parser.add_argument(
+        "--max-tokens-per-day",
+        type=int,
+        default=DEFAULT_MAX_TOKENS_PER_DAY,
+        help="Daily token budget per UTC day, shared with the worker through the decision log (default 500,000).",
+    )
+    parser.add_argument("--no-token-budget", action="store_true")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
@@ -196,11 +244,13 @@ def main(argv: list[str] | None = None) -> int:
 
     from providers.claude import ClaudeProvider
 
+    decision_log = DecisionLog(args.decision_log)
     app = create_app(
-        DecisionLog(args.decision_log),
+        decision_log,
         ClaudeProvider(),
         token,
         max_questions_per_hour=None if args.no_rate_limit else args.max_questions_per_hour,
+        budget=TokenBudget(None if args.no_token_budget else args.max_tokens_per_day, decision_log),
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
