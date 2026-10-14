@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -103,6 +103,26 @@ class FollowupRecord(BaseModel):
     model: str
     system_prompt: str | None = None
     attempts: list[AttemptRecord] = Field(default_factory=list)
+
+
+class TokenUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def add_attempts(self, attempts: list[dict]) -> None:
+        for attempt in attempts:
+            # An attempt that never got a reply (a connection error) has no
+            # usage and wasn't billed; it isn't counted as a call either.
+            if attempt.get("input_tokens") is None and attempt.get("output_tokens") is None:
+                continue
+            self.input_tokens += attempt.get("input_tokens") or 0
+            self.output_tokens += attempt.get("output_tokens") or 0
+            self.calls += 1
 
 
 class StoredDecision(BaseModel):
@@ -243,6 +263,18 @@ class DecisionLog:
             ).fetchall()
         return sum(1 for (body,) in rows if json.loads(body).get("attempts"))
 
+    def token_usage_between(self, start: datetime, end: datetime | None = None) -> TokenUsage:
+        usage = TokenUsage()
+        bounds = [start.astimezone(timezone.utc).isoformat()]
+        if end is not None:
+            bounds.append(end.astimezone(timezone.utc).isoformat())
+        with closing(self._connect()) as connection:
+            for table, column in (("decisions", "recorded_at"), ("followups", "asked_at")):
+                where = f"{column} >= ?" + (f" AND {column} < ?" if end is not None else "")
+                for (body,) in connection.execute(f"SELECT record_json FROM {table} WHERE {where}", bounds):
+                    usage.add_attempts(json.loads(body).get("attempts") or [])
+        return usage
+
     def _verify_chain(self, table: str, label: str) -> list[str]:
         problems = []
         expected_prev = GENESIS_HASH
@@ -269,9 +301,20 @@ def main(argv: list[str] | None = None) -> int:
     show = commands.add_parser("show", help="Print every decision recorded for one incident.")
     show.add_argument("incident_id")
     commands.add_parser("verify", help="Check the hash chain; exits 1 if anything was altered.")
+    usage = commands.add_parser("usage", help="Token usage per UTC day, analyses and follow-ups combined.")
+    usage.add_argument("--days", type=int, default=7)
     args = parser.parse_args(argv)
 
     log = DecisionLog(args.path)
+    if args.command == "usage":
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        print(f"{'day (UTC)':<12} {'calls':>6} {'input':>12} {'output':>12} {'total':>12}")
+        for offset in range(args.days - 1, -1, -1):
+            day = today - timedelta(days=offset)
+            used = log.token_usage_between(day, day + timedelta(days=1))
+            print(f"{day.date().isoformat():<12} {used.calls:>6} {used.input_tokens:>12,} "
+                  f"{used.output_tokens:>12,} {used.total_tokens:>12,}")
+        return 0
     if args.command == "show":
         decisions = log.for_incident(args.incident_id)
         if not decisions:
