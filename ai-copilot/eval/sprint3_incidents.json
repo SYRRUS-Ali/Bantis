@@ -1,0 +1,153 @@
+{
+  "incidents": [
+    {
+      "incident": {
+        "incident_id": "fd6ff83a-eb18-4eb0-82e6-ef04dc96133d",
+        "created_at": "2026-10-15T13:42:55.790644",
+        "pattern": "composite-dependency-secret",
+        "window_seconds": 300,
+        "correlated_event_ids": [
+          "f4678018-d02f-4c22-8d90-58da7f6fc451",
+          "18d7c4d4-ca82-44e6-9d7a-61ad046f422b"
+        ],
+        "mitre_techniques": [
+          "T1195.001",
+          "T1552.001"
+        ],
+        "severity": "high",
+        "confidence": 0.6,
+        "summary": "malicious-dependency + leaked-secret within 300s (0/2 succeeded)"
+      },
+      "events": [
+        {
+          "timestamp": "2026-10-15T13:42:54.749373",
+          "level": "INFO",
+          "logger": "attack_sim",
+          "source": "attack-sim",
+          "event_type": "attack_scenario_run",
+          "event_id": "f4678018-d02f-4c22-8d90-58da7f6fc451",
+          "message": "injected dependency was rejected \u2014 build failed as expected",
+          "details": {
+            "scenario": "malicious-dependency",
+            "mitre_technique": "T1195.001",
+            "status": "failure",
+            "artifact": "bantis-attack-sim-simulated-malicious-dependency==0.0.0",
+            "tool_returncode": 1,
+            "tool_output_tail": "no matching distribution"
+          },
+          "received_at": "2026-10-15T13:42:54.771116"
+        },
+        {
+          "timestamp": "2026-10-15T13:42:54.804628",
+          "level": "INFO",
+          "logger": "attack_sim",
+          "source": "attack-sim",
+          "event_type": "attack_scenario_run",
+          "event_id": "18d7c4d4-ca82-44e6-9d7a-61ad046f422b",
+          "message": "committed secret was caught by gitleaks as expected",
+          "details": {
+            "scenario": "leaked-secret",
+            "mitre_technique": "T1552.001",
+            "status": "failure",
+            "artifact": "config.py",
+            "tool_returncode": 1,
+            "tool_output_tail": "leak:aws-access-token"
+          },
+          "received_at": "2026-10-15T13:42:54.808742"
+        }
+      ]
+    },
+    {
+      "incident": {
+        "incident_id": "be476d9e-0a71-4595-8e10-ed9ae7064f24",
+        "created_at": "2026-10-15T13:42:55.790907",
+        "pattern": "same-source-burst",
+        "window_seconds": 60,
+        "correlated_event_ids": [
+          "b731cb69-dbd0-42af-acc1-facc2ae7e70e",
+          "17f41217-a6e3-477f-a970-e370f16621ba"
+        ],
+        "mitre_techniques": [
+          "T1195.002",
+          "T1195.001"
+        ],
+        "severity": "high",
+        "confidence": 0.5,
+        "summary": "2 attack-sim events within 60s: compromised-ci-step (success), typosquatting (success)"
+      },
+      "events": [
+        {
+          "timestamp": "2026-10-15T13:42:54.813380",
+          "level": "INFO",
+          "logger": "attack_sim",
+          "source": "attack-sim",
+          "event_type": "attack_scenario_run",
+          "event_id": "b731cb69-dbd0-42af-acc1-facc2ae7e70e",
+          "message": "injected a step that only logs suspicious execution \u2014 no real pipeline effect",
+          "details": {
+            "scenario": "compromised-ci-step",
+            "mitre_technique": "T1195.002",
+            "status": "success",
+            "artifact": "BANTIS-ATTACK-SIM-INJECTED",
+            "path": "/tmp/bantis-sprint3-export-gaawrj7k/ci.yml"
+          },
+          "received_at": "2026-10-15T13:42:54.816898"
+        },
+        {
+          "timestamp": "2026-10-15T13:42:55.770385",
+          "level": "INFO",
+          "logger": "attack_sim",
+          "source": "attack-sim",
+          "event_type": "attack_scenario_run",
+          "event_id": "17f41217-a6e3-477f-a970-e370f16621ba",
+          "message": "typosquatted package installed \u2014 no name-similarity check caught it",
+          "details": {
+            "scenario": "typosquatting",
+            "mitre_technique": "T1195.001",
+            "status": "success",
+            "artifact": "redsi==0.0.1",
+            "impersonates": "redis",
+            "tool_returncode": 0,
+            "tool_output_tail": "Looking in links: /tmp/bantis-sprint3-export-gaawrj7k/bantis-typosquatting-ecqj8xi_/fake-index\nProcessing /tmp/bantis-sprint3-export-gaawrj7k/bantis-typosquatting-ecqj8xi_/fake-index/redsi-0.0.1-py3-none-any.whl\nInstalling collected packages: redsi\nSuccessfully installed redsi-0.0.1\n",
+            "install_target": "/tmp/bantis-sprint3-export-gaawrj7k/bantis-typosquatting-ecqj8xi_/installed",
+            "wheel_path": "/tmp/bantis-sprint3-export-gaawrj7k/bantis-typosquatting-ecqj8xi_/fake-index/redsi-0.0.1-py3-none-any.whl"
+          },
+          "received_at": "2026-10-15T13:42:55.774139"
+        }
+      ]
+    },
+    {
+      "incident": {
+        "incident_id": "cfb49b9a-029a-420b-973d-8cbbc72412e9",
+        "created_at": "2026-10-15T13:42:55.790787",
+        "pattern": "untrusted-registry-pull",
+        "window_seconds": 0,
+        "correlated_event_ids": [
+          "sprint3-untrusted-pull"
+        ],
+        "mitre_techniques": [
+          "T1195.002"
+        ],
+        "severity": "high",
+        "confidence": 0.7,
+        "summary": "image pulled from untrusted registry 'registry.evil-mirror.example': registry.evil-mirror.example/python:3.12-slim"
+      },
+      "events": [
+        {
+          "timestamp": "2026-10-15T13:42:55.777785",
+          "level": "INFO",
+          "logger": "ci",
+          "source": "ci",
+          "event_type": "container_image_pull",
+          "event_id": "sprint3-untrusted-pull",
+          "message": "pulled image during build",
+          "details": {
+            "registry": "registry.evil-mirror.example",
+            "image": "registry.evil-mirror.example/python:3.12-slim"
+          },
+          "received_at": "2026-10-15T13:42:55.780533"
+        }
+      ]
+    }
+  ]
+}
