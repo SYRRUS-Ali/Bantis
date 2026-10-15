@@ -1,16 +1,15 @@
 # M3 Closure: Detection Engine (Sprint 3)
 
-Sprint 3 of the DevSecOps roadmap is M3 in this repo: the Detection
-Engine. This document closes it — what was delivered, how it was
+Sprint 3 is M3 in this repo: the Detection Engine. This document closes it — what was delivered, how it was
 verified, and what it does not do yet. It is written to be read cold:
 a reader should be able to decide from this page alone whether M3 is
 safe to build on, and what must be fixed before anything depends on it.
 
 ## What was delivered
 
-Mapped to the roadmap's Sprint 3 task list (rows 76–89):
+Mapped to the Sprint 3 task list:
 
-| Roadmap task | Delivered | Where |
+| Task | Delivered | Where |
 |---|---|---|
 | Define a reasonable time window; design the same-source, composite, and incident shape | `correlation-design.md` (three patterns, windows, incident schema, scoring) | [`correlation-design.md`](correlation-design.md) |
 | Build `detection-engine/` with `events` and `incidents` tables and an initial ingestion endpoint | `POST /events`, `EventORM`, `IncidentORM`, `init_db()` | `detection-engine/app/` |
@@ -118,8 +117,8 @@ These are the gaps a reader must know before relying on M3.
 - **Correlation is not automatic.** `run_correlation()` runs only when a
   script or test calls it. Incidents do not appear on their own.
 - **Concurrent correlation passes are not proven safe.** Two passes
-  running at once could both claim the same unclaimed events. I observed
-  this under a test harness, but the harness was confounded by SQLite's
+  running at once could both claim the same unclaimed events. This was
+  observed under a test harness, but the harness was confounded by SQLite's
   shared in-memory connection, so the result is inconclusive. It is not
   fixed and not ruled out.
 - **Postgres is never exercised in tests.** The production database
@@ -131,11 +130,6 @@ These are the gaps a reader must know before relying on M3.
 
 ### Process
 
-- **The roadmap tracker is out of date.** All Sprint 3 rows in
-  `private-local-folder/DevSecOps.xlsx` still read "لم يبدأ" (not
-  started), although every row above is delivered. The workbook is
-  private and gitignored, so I did not edit it. Its status column needs
-  updating by hand.
 - **No Sprint 3 git tag exists.** Sprint 1 and Sprint 2 were tagged
   (`v0.1.0-range`, `v0.2.0-attacksim`). A tag for this sprint has not
   been created.
