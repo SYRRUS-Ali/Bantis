@@ -101,6 +101,8 @@ class AnalysisTrace(BaseModel):
     response: CopilotResponse
     attempts: list[AttemptRecord] = Field(default_factory=list)
     system_prompt: str | None = None
+    prompt_version: str | None = None
+
 
 class FollowupTrace(BaseModel):
     answer: str | None = None

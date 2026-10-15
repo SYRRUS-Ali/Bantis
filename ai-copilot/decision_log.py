@@ -60,6 +60,7 @@ class DecisionRecord(BaseModel):
     outcome: str
     model: str
     system_prompt: str | None = None
+    prompt_version: str | None = None
     request: CopilotRequest | None = None
     attempts: list[AttemptRecord] = Field(default_factory=list)
     response: CopilotResponse | None = None
@@ -76,6 +77,7 @@ class DecisionRecord(BaseModel):
             outcome=trace.response.proposed_action.type,
             model=trace.response.model,
             system_prompt=trace.system_prompt,
+            prompt_version=trace.prompt_version,
             request=request,
             attempts=trace.attempts,
             response=trace.response,

@@ -7,36 +7,13 @@ import anthropic
 
 from models import AnalysisTrace, AttemptRecord, CopilotRequest, CopilotResponse, FollowupTrace
 from parser import OutputParseError, parse_model_output
+from prompts import CURRENT_ANALYSIS_PROMPT, AnalysisPrompt, fence_untrusted
 from providers.base import AIProvider
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
 MAX_VALIDATION_RETRIES = 2
 _MAX_TOKENS = 1024
-
-_SYSTEM_PROMPT = """\
-You are Bantis's AI Copilot. You analyze one correlated security \
-incident from a supply-chain detection system and respond with your \
-reasoning and a recommended next step.
-
-You never execute anything yourself -- you only recommend. Respond \
-with exactly one JSON object, nothing else before or after it, \
-matching this shape:
-
-{
-  "reasoning": "<your analysis, in plain language>",
-  "confidence": <float 0.0-1.0, your own confidence in this analysis>,
-  "proposed_action": {
-    "type": "<one of: notify_operator, flag_for_review, suggest_investigation, no_action_recommended>",
-    "description": "<one short sentence>",
-    "requires_approval": true
-  }
-}
-
-requires_approval must always be exactly true. It is not your choice --\
-every action in v1 requires a human operator's approval before anything \
-happens, with no exception."""
-
 
 _FOLLOWUP_SYSTEM_PROMPT = """\
 You are Bantis's AI Copilot. You already analyzed a security incident; an \
@@ -63,9 +40,11 @@ class ClaudeProvider(AIProvider):
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         client: anthropic.Anthropic | None = None,
+        prompt: AnalysisPrompt = CURRENT_ANALYSIS_PROMPT,
     ) -> None:
         self._client = client or anthropic.Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
         self._model = model
+        self._prompt = prompt
 
     @property
     def model(self) -> str:
@@ -73,20 +52,25 @@ class ClaudeProvider(AIProvider):
 
     def analyze_traced(self, request: CopilotRequest) -> AnalysisTrace:
         incident_id = request.incident.incident_id
-        messages: list[dict] = [{"role": "user", "content": request.model_dump_json()}]
+        messages: list[dict] = [{"role": "user", "content": self._prompt.render(request)}]
         attempts: list[AttemptRecord] = []
         last_error = "no attempt made"
         max_attempts = MAX_VALIDATION_RETRIES + 1
 
         def trace(response: CopilotResponse) -> AnalysisTrace:
-            return AnalysisTrace(response=response, attempts=attempts, system_prompt=_SYSTEM_PROMPT)
+            return AnalysisTrace(
+                response=response,
+                attempts=attempts,
+                system_prompt=self._prompt.system,
+                prompt_version=self._prompt.version,
+            )
 
         for number in range(1, max_attempts + 1):
             try:
                 reply = self._client.messages.create(
                     model=self._model,
                     max_tokens=_MAX_TOKENS,
-                    system=_SYSTEM_PROMPT,
+                    system=self._prompt.system,
                     messages=messages,
                 )
             except anthropic.APIError as exc:
@@ -171,8 +155,7 @@ def _followup_messages(
         "incident_request": request.model_dump(mode="json"),
         "your_analysis": analysis.model_dump(mode="json", include={"reasoning", "confidence", "proposed_action"}),
     }
-    data_json = json.dumps(data, indent=2).replace("<", "\\u003c").replace(">", "\\u003e")
-    data_block = f"<incident_data>\n{data_json}\n</incident_data>"
+    data_block = fence_untrusted(data)
     turns = [*history, (question, None)]
     messages: list[dict] = []
     for index, (asked, answered) in enumerate(turns):
