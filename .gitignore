@@ -20,3 +20,6 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Prompt evaluation reports: generated per run, contain provider request IDs
+ai-copilot/eval/results/
