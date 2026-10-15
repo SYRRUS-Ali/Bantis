@@ -24,6 +24,11 @@ ai-copilot/
 ├── decision_log.py        # append-only, hash-chained record of every analysis and follow-up (+ show/verify CLI)
 ├── api.py                 # authenticated HTTP API for follow-up questions ("Ask the Copilot") and /usage
 ├── budget.py              # daily token budget shared by the worker and the API
+├── prompts.py             # versioned analysis prompts + the shared untrusted-data fence
+├── eval/
+│   ├── sprint3_incidents.json  # real Sprint 3 incidents (tests/export_sprint3_incidents.py)
+│   ├── evaluate_prompt.py      # runs prompt versions side by side -> a manual scoring report
+│   └── README.md               # the prompt review, rubric, and how to run it
 ├── providers/
 │   ├── base.py              # AIProvider — the abstraction ADR 0003 asks for
 │   └── claude.py             # ClaudeProvider — the only implementation in v1
@@ -37,6 +42,7 @@ ai-copilot/
 │   ├── test_decision_log.py
 │   ├── test_followup_api.py
 │   ├── test_budget.py
+│   ├── test_prompts.py
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -285,12 +291,20 @@ and the dashboard will need that. `run_correlation()` itself is still
 not automatic in detection-engine, so an incident only exists for the
 worker to find once something has called it.
 
-**Known gap:** the *initial* analysis prompt (the worker's) doesn't yet
-use the same `<incident_data>` delimiting and untrusted-data instruction
-as follow-ups. Its output is constrained to the validated action enum, so
-injected text can't produce an executable action, but it could still try
-to steer which recommendation is made. Bringing the same protection to it
-is the obvious next fix.
+### Prompts (`prompts.py`)
+
+The analysis prompt is versioned. `v2` is current; `v1` is kept verbatim
+so a change can be compared side by side on the same real incidents, and
+every decision-log record stores which version produced it. `v2` came out
+of reviewing `v1` against the real Sprint 3 incidents: it tells the model
+what the data means (`status` is from the attacker's side, so `"failure"`
+means the attack was blocked; exit codes differ per tool; `attack-sim` is
+Bantis's own simulator, though a label anyone can forge), defines the four
+actions, and fences the evidence as untrusted data the same way
+follow-ups do. The analysis prompt used to be missing that fencing. Full
+review, rubric and how to run the A/B comparison: [`eval/README.md`](eval/README.md).
+**Model outputs haven't been scored yet** — that needs an API key; the
+harness is ready for it.
 
 ### Validation and retries
 

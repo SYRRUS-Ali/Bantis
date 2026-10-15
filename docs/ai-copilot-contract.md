@@ -120,6 +120,17 @@ exactly the kind of field nobody has reviewed for secret content.
 `flag_for_review`, `suggest_investigation`, `no_action_recommended`,
 `analysis_failed`.
 
+What each one means — the same definitions the analysis prompt gives
+the model, so the choice isn't arbitrary:
+
+| Type | When |
+|---|---|
+| `flag_for_review` | Something got through, or the combination is concerning enough that a human should review it now. |
+| `suggest_investigation` | The evidence is ambiguous or incomplete; the description says exactly what to check. |
+| `notify_operator` | The defenses held; worth knowing, nothing to fix. |
+| `no_action_recommended` | Clearly benign or already fully handled. Meant to be rare. |
+| `analysis_failed` | Bantis's own marker that no valid analysis exists — never produced by the model. |
+
 `analysis_failed` exists specifically so a failed call and a genuine
 "nothing's wrong" conclusion are never the same value — see Error cases
 below; a provider timeout must never be representable as
