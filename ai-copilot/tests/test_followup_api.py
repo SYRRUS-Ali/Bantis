@@ -15,7 +15,7 @@ from models import (
     IncidentPayload,
     ProposedAction,
 )
-from providers.base import AIProvider
+from providers.base import AIProvider, UnavailableProvider
 
 _TOKEN = "test-token-0123456789abcdef"
 _AUTH = {"Authorization": f"Bearer {_TOKEN}"}
@@ -309,3 +309,22 @@ def test_usage_reports_todays_spend_against_the_budget(log, provider):
 
 def test_usage_requires_the_token(client):
     assert client.get("/usage").status_code == 401
+
+
+# ---- Provider unavailable -----------------------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["ANTHROPIC_API_KEY is not set", "provider error: Connection error."])
+def test_an_unavailable_provider_gives_503_and_leaves_the_incident_intact(log, reason):
+    client = TestClient(create_app(log, UnavailableProvider(reason), _TOKEN))
+
+    response = client.post("/incidents/inc-1/questions", json={"question": "why?"}, headers=_AUTH)
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "60"
+    assert reason not in response.text  # configuration details stay in the server log
+    [followup] = log.followups_for("inc-1")
+    assert (followup.answer, followup.error) == (None, reason)
+    assert log.for_incident("inc-1")[0].record.outcome == "flag_for_review"  # the analysis is untouched
+    assert client.get("/incidents/inc-1/questions", headers=_AUTH).json() == []
+    assert client.get("/usage", headers=_AUTH).status_code == 200

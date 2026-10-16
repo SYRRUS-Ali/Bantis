@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from budget import DEFAULT_MAX_TOKENS_PER_DAY, TokenBudget
 from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
 from decision_log import DecisionLog, FollowupRecord
-from providers.base import AIProvider
+from providers.base import AIProvider, ProviderUnavailableError
 
 logger = logging.getLogger("ai_copilot.api")
 
@@ -156,7 +156,25 @@ def create_app(
             )
 
         history = [(f.question, f.answer) for f in decision_log.followups_for(incident_id) if f.answer]
-        trace = provider.ask(record.request, record.response, history[-HISTORY_TURNS:], body.question)
+        try:
+            trace = provider.ask(record.request, record.response, history[-HISTORY_TURNS:], body.question)
+        except ProviderUnavailableError as exc:
+            decision_log.append_followup(
+                FollowupRecord(
+                    incident_id=incident_id,
+                    question=body.question,
+                    error=str(exc),
+                    model=getattr(provider, "model", type(provider).__name__),
+                )
+            )
+            logger.warning("follow-up on %s not answered: AI provider unavailable (%s)", incident_id, exc)
+            # The detail stays generic: the reason can name configuration
+            # (a missing key) that a client has no need to learn.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="the AI provider is unavailable; the incident and its recorded analysis are unaffected -- try again later",
+                headers={"Retry-After": "60"},
+            ) from None
 
         followup = FollowupRecord(
             incident_id=incident_id,
@@ -242,12 +260,15 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    from providers.claude import ClaudeProvider
+    from providers.claude import from_environment
 
+    provider = from_environment()
+    if reason := getattr(provider, "reason", None):
+        logger.error("AI provider not configured (%s): follow-up questions will return 503", reason)
     decision_log = DecisionLog(args.decision_log)
     app = create_app(
         decision_log,
-        ClaudeProvider(),
+        provider,
         token,
         max_questions_per_hour=None if args.no_rate_limit else args.max_questions_per_hour,
         budget=TokenBudget(None if args.no_token_budget else args.max_tokens_per_day, decision_log),
