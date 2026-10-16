@@ -8,12 +8,17 @@ import anthropic
 from models import AnalysisTrace, AttemptRecord, CopilotRequest, CopilotResponse, FollowupTrace
 from parser import OutputParseError, parse_model_output
 from prompts import CURRENT_ANALYSIS_PROMPT, AnalysisPrompt, fence_untrusted
-from providers.base import AIProvider
+from providers.base import AIProvider, ProviderUnavailableError, UnavailableProvider
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
 MAX_VALIDATION_RETRIES = 2
 _MAX_TOKENS = 1024
+
+REQUEST_TIMEOUT_SECONDS = 60.0
+SDK_MAX_RETRIES = 2
+
+_UNAVAILABLE_STATUSES = {401, 403, 408, 429}
 
 _FOLLOWUP_SYSTEM_PROMPT = """\
 You are Bantis's AI Copilot. You already analyzed a security incident; an \
@@ -42,7 +47,11 @@ class ClaudeProvider(AIProvider):
         client: anthropic.Anthropic | None = None,
         prompt: AnalysisPrompt = CURRENT_ANALYSIS_PROMPT,
     ) -> None:
-        self._client = client or anthropic.Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
+        self._client = client or anthropic.Anthropic(
+            api_key=api_key or os.environ["ANTHROPIC_API_KEY"],
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            max_retries=SDK_MAX_RETRIES,
+        )
         self._model = model
         self._prompt = prompt
 
@@ -75,6 +84,8 @@ class ClaudeProvider(AIProvider):
                 )
             except anthropic.APIError as exc:
                 error = f"provider error: {exc}"
+                if _is_unavailable(exc) and not attempts:
+                    raise ProviderUnavailableError(error) from exc
                 attempts.append(AttemptRecord(number=number, raw_output="", error=error))
                 return trace(CopilotResponse.analysis_failed(incident_id, self._model, error))
 
@@ -128,6 +139,8 @@ class ClaudeProvider(AIProvider):
             )
         except anthropic.APIError as exc:
             error = f"provider error: {exc}"
+            if _is_unavailable(exc):
+                raise ProviderUnavailableError(error) from exc
             return trace(error=error, attempts=[AttemptRecord(number=1, raw_output="", error=error)])
 
         text = "".join(block.text for block in reply.content if block.type == "text").strip()
@@ -146,6 +159,27 @@ class ClaudeProvider(AIProvider):
         if stop_reason == "max_tokens":
             text += _FOLLOWUP_TRUNCATED_NOTE  # never present a cut-off answer as complete
         return trace(answer=text, attempts=[attempt])
+
+
+def from_environment() -> AIProvider:
+    """The provider the worker and API run with: Claude when a key is set,
+    otherwise a stand-in that reports itself unavailable instead of
+    crashing the process at startup.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return UnavailableProvider("ANTHROPIC_API_KEY is not set")
+    return ClaudeProvider()
+
+
+def _is_unavailable(exc: anthropic.APIError) -> bool:
+    """True when the failure says nothing about this request -- the provider
+    was unreachable or refused service -- so the same call can succeed later.
+    A rejected request (400, 404, 413, 422) would fail the same way again.
+    """
+    if isinstance(exc, anthropic.APIConnectionError):  # includes timeouts
+        return True
+    status_code = getattr(exc, "status_code", None)
+    return status_code is not None and (status_code in _UNAVAILABLE_STATUSES or status_code >= 500)
 
 
 def _followup_messages(

@@ -219,12 +219,27 @@ def test_the_harness_report_says_when_analyses_failed(monkeypatch):
 
     import eval.evaluate_prompt as harness
 
+    client, _ = _client("not an analysis")  # valid output never arrives: 3 attempts, then analysis_failed
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: client)
+
+    report = harness.evaluate(harness.load_requests(_FIXTURE), ["v1", "v2"], "claude-test")
+
+    assert "**6 of 6 analyses failed and have nothing to score.**" in report
+
+
+def test_the_harness_stops_when_the_provider_is_down(monkeypatch, tmp_path, capsys):
+    import anthropic
+
+    import eval.evaluate_prompt as harness
+
     def create(**kwargs):
         raise anthropic.APIConnectionError(request=None)
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(harness, "_EVAL_DIR", tmp_path)
 
-    report = harness.evaluate(harness.load_requests(_FIXTURE), ["v1", "v2"], "claude-test")
-
-    assert "**6 of 6 analyses failed and have nothing to score.**" in report
+    assert harness.main([]) == 3
+    assert "No report written" in capsys.readouterr().err
+    assert not (tmp_path / "results").exists()

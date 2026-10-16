@@ -12,6 +12,7 @@ sys.path.insert(0, str(_EVAL_DIR.parent))
 
 from converter import build_copilot_request  # noqa: E402
 from prompts import ANALYSIS_PROMPTS, CURRENT_ANALYSIS_PROMPT  # noqa: E402
+from providers.base import ProviderUnavailableError  # noqa: E402
 
 DEFAULT_FIXTURE = _EVAL_DIR / "sprint3_incidents.json"
 
@@ -149,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
           f"(up to {len(requests) * len(args.versions) * 3} model calls) with {model}...", file=sys.stderr)
     try:
         report = evaluate(requests, args.versions, model)
-    except ProviderAuthError as exc:
+    except (ProviderAuthError, ProviderUnavailableError) as exc:
         print(f"stopped: {exc}. No report written.", file=sys.stderr)
         return 3
     out_dir = _EVAL_DIR / "results"

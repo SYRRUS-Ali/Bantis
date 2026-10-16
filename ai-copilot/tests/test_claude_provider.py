@@ -3,10 +3,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import pytest
 
 from models import CopilotRequest, EvidenceEntry, IncidentPayload
-from providers.claude import ClaudeProvider
+from providers.base import ProviderUnavailableError, UnavailableProvider
+from providers.claude import ClaudeProvider, from_environment
 
 _T0 = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -75,6 +77,11 @@ def _fake_client(*responses):
     return SimpleNamespace(messages=_FakeMessages(responses))
 
 
+def _status_error(cls, status_code: int):
+    response = httpx.Response(status_code, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return cls("status error", response=response, body=None)
+
+
 def test_analyze_returns_a_validated_response_on_the_first_try():
     client = _fake_client(_text_message(_VALID_REPLY))
     provider = ClaudeProvider(client=client)
@@ -124,14 +131,77 @@ def test_analyze_falls_back_to_analysis_failed_after_exhausting_retries():
     assert len(client.messages.calls) == 3  # original attempt + 2 retries, no more
 
 
-def test_analyze_never_retries_a_provider_level_error():
+def test_an_unreachable_provider_is_reported_as_unavailable_not_as_an_analysis():
+    """An outage says nothing about the incident; recording it as the
+    analysis would use up the incident's one decision for good.
+    """
     client = _fake_client(anthropic.APIConnectionError(request=SimpleNamespace()))
     provider = ClaudeProvider(client=client)
 
-    response = provider.analyze(_request())
-
-    assert response.proposed_action.type == "analysis_failed"
+    with pytest.raises(ProviderUnavailableError, match="provider error"):
+        provider.analyze(_request())
     assert len(client.messages.calls) == 1  # no retry -- a dead connection won't fix itself
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        anthropic.APITimeoutError(request=SimpleNamespace()),
+        _status_error(anthropic.AuthenticationError, 401),
+        _status_error(anthropic.PermissionDeniedError, 403),
+        _status_error(anthropic.RateLimitError, 429),
+        _status_error(anthropic.InternalServerError, 500),
+        _status_error(anthropic.ServiceUnavailableError, 503),
+        _status_error(anthropic.OverloadedError, 529),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_every_kind_of_outage_counts_as_unavailable(error):
+    with pytest.raises(ProviderUnavailableError):
+        ClaudeProvider(client=_fake_client(error)).analyze_traced(_request())
+
+
+@pytest.mark.parametrize("cls, status_code", [(anthropic.BadRequestError, 400), (anthropic.NotFoundError, 404)])
+def test_a_rejected_request_is_a_recorded_failure_not_an_outage(cls, status_code):
+    """The same request would be rejected again, so retrying later can't help."""
+    trace = ClaudeProvider(client=_fake_client(_status_error(cls, status_code))).analyze_traced(_request())
+
+    assert trace.response.proposed_action.type == "analysis_failed"
+    assert trace.attempts[0].error.startswith("provider error:")
+
+
+def test_an_outage_after_a_paid_attempt_is_recorded_so_its_tokens_count():
+    client = _fake_client(_raw_message("not json"), anthropic.APIConnectionError(request=SimpleNamespace()))
+
+    trace = ClaudeProvider(client=client).analyze_traced(_request())
+
+    assert trace.response.proposed_action.type == "analysis_failed"
+    assert len(trace.attempts) == 2
+
+
+def test_the_real_client_has_a_bounded_timeout():
+    provider = ClaudeProvider(api_key="sk-ant-test")
+
+    assert provider._client.timeout == 60.0
+    assert provider._client.max_retries == 2
+
+
+def test_without_a_key_the_environment_gives_a_stand_in_instead_of_crashing(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    provider = from_environment()
+
+    assert isinstance(provider, UnavailableProvider)
+    with pytest.raises(ProviderUnavailableError, match="ANTHROPIC_API_KEY is not set"):
+        provider.analyze_traced(_request())
+    with pytest.raises(ProviderUnavailableError):
+        provider.ask(_request(), None, [], "q")
+
+
+def test_with_a_key_the_environment_gives_claude(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    assert isinstance(from_environment(), ClaudeProvider)
 
 
 def test_a_response_that_tries_to_disable_approval_is_rejected_and_falls_back():
@@ -249,7 +319,7 @@ def test_the_trace_keeps_every_attempt_including_rejected_ones():
 
 
 def test_the_trace_records_a_provider_error_as_an_attempt():
-    client = _fake_client(anthropic.APIConnectionError(request=SimpleNamespace()))
+    client = _fake_client(_status_error(anthropic.BadRequestError, 400))
 
     trace = ClaudeProvider(client=client).analyze_traced(_request())
 
@@ -344,8 +414,15 @@ def test_an_injected_closing_tag_cannot_escape_the_data_block():
     assert data["incident_request"]["evidence_timeline"][0]["summary_fields"]["artifact"] == injected  # nothing lost
 
 
-def test_ask_reports_a_provider_error_without_an_answer():
+def test_ask_reports_an_unreachable_provider_as_unavailable():
     client = _fake_client(anthropic.APIConnectionError(request=SimpleNamespace()))
+
+    with pytest.raises(ProviderUnavailableError):
+        ClaudeProvider(client=client).ask(_request(), _analysis(), [], "q")
+
+
+def test_ask_reports_a_provider_error_without_an_answer():
+    client = _fake_client(_status_error(anthropic.BadRequestError, 400))
 
     trace = ClaudeProvider(client=client).ask(_request(), _analysis(), [], "q")
 
