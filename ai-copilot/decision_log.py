@@ -222,6 +222,13 @@ class DecisionLog:
         finally:
             connection.close()
 
+    def release_claim(self, incident_id: str, owner: str) -> None:
+        """Give up a claim without deciding, so another worker can take the
+        incident now rather than after the lease expires.
+        """
+        with closing(self._connect()) as connection:
+            connection.execute("DELETE FROM claims WHERE incident_id = ? AND owner = ?", (incident_id, owner))
+
     def count_analyses_since(self, since: datetime) -> int:
         with closing(self._connect()) as connection:
             rows = connection.execute(
