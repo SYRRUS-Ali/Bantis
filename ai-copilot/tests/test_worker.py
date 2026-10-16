@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -5,7 +6,8 @@ import pytest
 from converter import as_utc_datetime
 from detection_client import DetectionEngineError
 from models import AnalysisTrace, AttemptRecord, CopilotResponse, ProposedAction
-from providers.base import AIProvider
+from decision_log import DecisionLog
+from providers.base import AIProvider, ProviderUnavailableError
 from worker import CopilotWorker
 
 _START = datetime(2026, 10, 10, 12, 0, 0, tzinfo=timezone.utc)
@@ -569,3 +571,114 @@ def test_running_out_of_budget_is_logged_with_the_reset_time(tmp_path, caplog):
 
     [message] = [r.getMessage() for r in caplog.records if "token budget" in r.getMessage()]
     assert "daily token budget of 100 exhausted (160 used today); 1 incident(s) deferred until" in message
+
+# ---- AI provider unavailable --------------------------------------------------
+
+
+class FlakyProvider(FakeProvider):
+    """Unavailable until `down` is cleared, like a real outage."""
+
+    def __init__(self):
+        super().__init__()
+        self.down = True
+
+    def analyze_traced(self, request):
+        if self.down:
+            self.analyzed.append(request.incident.incident_id)
+            raise ProviderUnavailableError("provider error: Connection error.")
+        return super().analyze_traced(request)
+
+
+def _outage_worker(client, provider, tmp_path, **kwargs):
+    unanalyzed = []
+    log = DecisionLog(tmp_path / "decisions.db")
+    worker, delivered = _worker(
+        client,
+        provider,
+        decision_log=log,
+        on_unanalyzed=lambda incident, reason: unanalyzed.append((incident["incident_id"], reason)),
+        **kwargs,
+    )
+    return worker, delivered, unanalyzed, log
+
+
+def test_an_outage_delivers_the_incident_without_analysis_and_decides_nothing(tmp_path):
+    client = FakeClient([_incident("inc-1", 5)])
+    worker, delivered, unanalyzed, log = _outage_worker(client, FlakyProvider(), tmp_path)
+
+    assert worker.poll_once() == []
+
+    assert unanalyzed == [("inc-1", "AI analysis unavailable: provider error: Connection error.")]
+    assert delivered == []
+    assert not log.has_incident("inc-1")  # its one decision is still unused
+    assert log.try_claim("inc-1", "another-worker")  # and the claim was released, not left to expire
+
+
+def test_an_open_circuit_stops_calling_the_provider_and_announces_each_incident_once(tmp_path):
+    client = FakeClient([_incident("inc-1", 5), _incident("inc-2", 6), _incident("inc-3", 7)])
+    provider = FlakyProvider()
+    worker, _, unanalyzed, _ = _outage_worker(client, provider, tmp_path, provider_retry_seconds=3600)
+
+    worker.poll_once()
+    worker.poll_once()
+
+    assert provider.analyzed == ["inc-1"]  # one failed call, not one per incident per poll
+    assert sorted(i for i, _ in unanalyzed) == ["inc-1", "inc-2", "inc-3"]
+
+
+def test_incidents_are_analyzed_once_the_provider_recovers(tmp_path):
+    client = FakeClient([_incident("inc-1", 5), _incident("inc-2", 6)])
+    provider = FlakyProvider()
+    worker, delivered, unanalyzed, log = _outage_worker(client, provider, tmp_path, provider_retry_seconds=0)
+
+    worker.poll_once()
+    provider.down = False
+    results = worker.poll_once()
+
+    assert [r.incident_id for r in results] == ["inc-1", "inc-2"]
+    assert [i for i, _ in delivered] == ["inc-1", "inc-2"]
+    assert [d.record.outcome for d in log.for_incident("inc-1")] == ["flag_for_review"]
+    assert len(unanalyzed) == 2
+    worker.poll_once()
+    assert len(delivered) == 2 and len(unanalyzed) == 2  # nothing delivered twice
+
+
+def test_the_retry_interval_backs_off_and_is_capped(tmp_path):
+    from worker import MAX_PROVIDER_RETRY_SECONDS
+
+    worker, *_ = _outage_worker(FakeClient(), FlakyProvider(), tmp_path, provider_retry_seconds=30)
+
+    waits = []
+    for _ in range(7):
+        worker._mark_provider_down("down")
+        waits.append(worker._provider_backoff.total_seconds())
+    worker._mark_provider_up()
+
+    assert waits == [30, 60, 120, 240, 480, MAX_PROVIDER_RETRY_SECONDS, MAX_PROVIDER_RETRY_SECONDS]
+    assert not worker._provider_down() and worker._provider_backoff.total_seconds() == 0
+
+
+def test_skipped_incidents_are_still_recorded_during_an_outage(tmp_path):
+    client = FakeClient([_incident("inc-solo", 5, event_ids=("e1",))])
+    provider = FlakyProvider()
+    worker, _, unanalyzed, log = _outage_worker(client, provider, tmp_path)
+
+    worker.poll_once()
+
+    assert provider.analyzed == [] and unanalyzed == []
+    assert log.for_incident("inc-solo")[0].record.outcome == "skipped"
+
+
+def test_the_worker_starts_without_a_key_and_delivers_incidents_unanalyzed(monkeypatch, tmp_path, capsys):
+    import worker as worker_module
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(worker_module, "DetectionEngineClient", lambda url: FakeClient([_incident("inc-1", 5)]))
+
+    code = worker_module.main(["--once", "--since", _START.isoformat(), "--decision-log", str(tmp_path / "d.db")])
+
+    assert code == 0
+    [line] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert line["incident"]["incident_id"] == "inc-1"
+    assert line["analysis"] is None
+    assert line["analysis_pending"] == "AI analysis unavailable: ANTHROPIC_API_KEY is not set"

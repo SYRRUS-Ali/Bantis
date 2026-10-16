@@ -19,13 +19,16 @@ from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
 from decision_log import DecisionLog, DecisionRecord, DuplicateDecisionError
 from detection_client import DetectionEngineClient, DetectionEngineError
 from models import CopilotResponse
-from providers.base import AIProvider
+from providers.base import AIProvider, ProviderUnavailableError
 
 logger = logging.getLogger("ai_copilot.worker")
 
 DEFAULT_LOOKBACK_SECONDS = 60
+DEFAULT_PROVIDER_RETRY_SECONDS = 30.0
+MAX_PROVIDER_RETRY_SECONDS = 600.0
 
 ResultSink = Callable[[dict, CopilotResponse], None]
+UnanalyzedSink = Callable[[dict, str], None]
 
 _SEVERITY_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
 _RATE_WINDOW = timedelta(hours=1)
@@ -48,6 +51,11 @@ def print_result(incident: dict, response: CopilotResponse) -> None:
     print(json.dumps(line), flush=True)
 
 
+def print_unanalyzed(incident: dict, reason: str) -> None:
+    line = {"incident": incident, "analysis": None, "analysis_pending": reason}
+    print(json.dumps(line), flush=True)
+
+
 class CopilotWorker:
     def __init__(
         self,
@@ -59,8 +67,16 @@ class CopilotWorker:
         decision_log: DecisionLog | None = None,
         policy: ThrottlePolicy | None = None,
         budget: TokenBudget | None = None,
+        on_unanalyzed: UnanalyzedSink = print_unanalyzed,
+        provider_retry_seconds: float = DEFAULT_PROVIDER_RETRY_SECONDS,
     ) -> None:
         self._client = client
+        self._on_unanalyzed = on_unanalyzed
+        self._provider_retry = timedelta(seconds=provider_retry_seconds)
+        self._provider_backoff = timedelta(0)
+        self._provider_down_until: datetime | None = None
+        self._provider_down_reason = ""
+        self._announced: dict[str, datetime] = {}
         self._decision_log = decision_log
         self._policy = policy or ThrottlePolicy()
         self._budget = budget or TokenBudget(decision_log=decision_log)
@@ -95,12 +111,18 @@ class CopilotWorker:
         newest_done = self._cursor
         throttled = 0
         over_budget = 0
+        unanalyzed = 0
         for created_at, incident in pending:
             incident_id = incident["incident_id"]
             if self._already_logged(incident_id):
                 pass
             elif reason := self._policy.skip_reason(incident):
                 self._record_skip(incident_id, reason)
+            elif self._provider_down():
+                unanalyzed += 1
+                self._deliver_unanalyzed(incident, created_at)
+                deferred.append(created_at)
+                continue
             elif self._budget.status().exhausted:
                 over_budget += 1
                 deferred.append(created_at)
@@ -113,10 +135,19 @@ class CopilotWorker:
                 deferred.append(created_at)
                 continue
             else:
-                record = self._analyze(incident)
+                try:
+                    record = self._analyze(incident)
+                except ProviderUnavailableError as exc:
+                    self._release_claim(incident_id)
+                    self._mark_provider_down(str(exc))
+                    unanalyzed += 1
+                    self._deliver_unanalyzed(incident, created_at)
+                    deferred.append(created_at)
+                    continue
                 if record is None:
                     deferred.append(created_at)
                     continue
+                self._mark_provider_up()
                 self._record(incident, record)
                 self._budget.record(record.attempts)
                 if record.attempts:
@@ -124,6 +155,7 @@ class CopilotWorker:
                 if record.response is not None:
                     results.append(record.response)
             self._processed[incident_id] = created_at
+            self._announced.pop(incident_id, None)
             newest_done = max(newest_done, created_at)
 
         if over_budget:
@@ -135,6 +167,12 @@ class CopilotWorker:
                 over_budget,
                 status.resets_at.isoformat(),
             )
+        if unanalyzed:
+            logger.warning(
+                "AI provider unavailable; %d incident(s) delivered without AI analysis, next try at %s",
+                unanalyzed,
+                self._provider_down_until.isoformat(),
+            )
         if throttled:
             logger.warning(
                 "rate limit of %s analyses/hour reached; %d incident(s) deferred to a later poll",
@@ -144,6 +182,51 @@ class CopilotWorker:
         self._cursor = min([newest_done, *deferred])
         self._forget_ids_older_than(self._cursor - self._lookback)
         return results
+
+    def _provider_down(self) -> bool:
+        return self._provider_down_until is not None and datetime.now(timezone.utc) < self._provider_down_until
+
+    def _mark_provider_down(self, reason: str) -> None:
+        # Back off exponentially so a long outage costs one failed call per
+        # interval, not one per incident per poll.
+        self._provider_backoff = min(
+            max(self._provider_backoff * 2, self._provider_retry), timedelta(seconds=MAX_PROVIDER_RETRY_SECONDS)
+        )
+        self._provider_down_until = datetime.now(timezone.utc) + self._provider_backoff
+        self._provider_down_reason = reason
+        logger.error(
+            "AI provider unavailable (%s); incidents continue without AI analysis and are retried after %ds",
+            reason,
+            self._provider_backoff.total_seconds(),
+        )
+
+    def _mark_provider_up(self) -> None:
+        if self._provider_down_until is not None:
+            logger.info("AI provider reachable again; analyzing deferred incidents")
+        self._provider_down_until = None
+        self._provider_backoff = timedelta(0)
+
+    def _deliver_unanalyzed(self, incident: dict, created_at: datetime) -> None:
+        """Hand the incident on without an analysis, once, so an outage delays
+        the AI's opinion but never the incident itself. It stays deferred and
+        is analyzed (and delivered again, with the analysis) on recovery.
+        """
+        incident_id = incident["incident_id"]
+        if incident_id in self._announced:
+            return
+        self._announced[incident_id] = created_at
+        try:
+            self._on_unanalyzed(incident, f"AI analysis unavailable: {self._provider_down_reason}")
+        except Exception:
+            logger.exception("unanalyzed sink failed for %s", incident_id)
+
+    def _release_claim(self, incident_id: str) -> None:
+        if self._decision_log is None:
+            return
+        try:
+            self._decision_log.release_claim(incident_id, self._owner)
+        except Exception:
+            logger.exception("could not release the claim on %s; it expires with its lease", incident_id)
 
     def _within_rate_limit(self) -> bool:
         limit = self._policy.max_analyses_per_hour
@@ -187,6 +270,8 @@ class CopilotWorker:
         try:
             request = build_copilot_request(incident, events)
             return DecisionRecord.from_trace(incident_id, request, self._provider.analyze_traced(request))
+        except ProviderUnavailableError:
+            raise
         except MissingEvidenceError as exc:
             response = CopilotResponse.analysis_failed(incident_id, "none (not sent to a provider)", str(exc))
             return DecisionRecord.without_provider_call(incident_id, None, response, "evidence incomplete; not sent to the AI")
@@ -215,6 +300,7 @@ class CopilotWorker:
 
     def _forget_ids_older_than(self, horizon: datetime) -> None:
         self._processed = {i: t for i, t in self._processed.items() if t >= horizon}
+        self._announced = {i: t for i, t in self._announced.items() if t >= horizon}
 
     def run_forever(self, interval_seconds: float, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
@@ -266,12 +352,15 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
 
-    from providers.claude import ClaudeProvider
+    from providers.claude import from_environment
 
+    provider = from_environment()
+    if reason := getattr(provider, "reason", None):
+        logger.error("AI provider not configured (%s): incidents will be delivered without AI analysis", reason)
     decision_log = DecisionLog(args.decision_log)
     worker = CopilotWorker(
         DetectionEngineClient(args.detection_engine_url),
-        ClaudeProvider(),
+        provider,
         start_from=args.since,
         decision_log=decision_log,
         budget=TokenBudget(None if args.no_token_budget else args.max_tokens_per_day, decision_log),
