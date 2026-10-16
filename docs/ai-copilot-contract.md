@@ -221,10 +221,16 @@ count and the last validation error as the reason.
 
 | Case | Response |
 |---|---|
-| Provider unreachable or times out | `proposed_action.type = "analysis_failed"`, `reasoning = "analysis unavailable: <reason>"`, `confidence = 0.0`. Stored, not discarded. |
+| Provider unavailable: unreachable, timed out, overloaded or erroring (5xx, 529), rate-limited (429), key missing or rejected (401/403) | **No response.** The provider raises `ProviderUnavailableError`; nothing is stored and the incident is delivered without an analysis, then analyzed once the provider is back (`ai-copilot/README.md#when-the-ai-provider-is-unavailable`). |
+| Provider rejects the request (400, 404, 413, 422), or becomes unavailable after a paid attempt | `proposed_action.type = "analysis_failed"`, `reasoning = "analysis unavailable: <reason>"`, `confidence = 0.0`. Stored, not discarded. |
 | Output fails validation after all retries | Same fallback shape as above, with the validation failure (not the model's malformed text) as the reason. |
 
-Both cases produce a stored, visible result rather than nothing. An
+An outage is not stored as `analysis_failed` because it says nothing
+about the incident: storing it would use up the incident's one decision,
+and the analysis would never happen. It is still visible — the incident
+is delivered marked "AI analysis unavailable", never silently dropped.
+
+The other two cases produce a stored, visible result rather than nothing. An
 operator must be able to see "the copilot couldn't analyze this" as a
 distinct, logged state — a silent gap would be indistinguishable from
 "the copilot looked and found nothing," which is a materially different

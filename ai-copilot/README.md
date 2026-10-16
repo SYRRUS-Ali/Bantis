@@ -109,6 +109,9 @@ an incident:
   restarts and even when `--since` reaches back over it.
 - **Missing evidence** isn't sent to the AI at all — it's recorded as
   `analysis_failed` without a provider call.
+- **Provider unavailable.** See "When the AI provider is unavailable"
+  below: the incident is delivered without an analysis and nothing is
+  recorded, so it's analyzed once the provider is back.
 - **One worker per incident.** Before calling the model, a worker
   atomically claims the incident in the decision log (`try_claim`, under
   SQLite's write lock). Checking "not in the log yet" and then calling
@@ -117,6 +120,42 @@ an incident:
   claim expires after 15 minutes, so a worker that crashes mid-analysis
   doesn't block its incident forever. As a backstop, the log refuses a
   second decision for the same incident outright.
+
+### When the AI provider is unavailable
+
+An outage of the AI provider delays the AI's opinion, never the incident.
+Incidents keep forming and being served by detection-engine, which
+doesn't depend on ai-copilot at all; ai-copilot itself keeps running.
+
+| Situation | Before | Now |
+|---|---|---|
+| `ANTHROPIC_API_KEY` not set | `worker.py` and `api.py` crashed at startup (`KeyError`) | both start, log an `ERROR`, and run without AI analysis |
+| Provider unreachable, timing out, overloaded (5xx, 529), rate-limited (429), or rejecting the key (401/403) | recorded as the incident's final `analysis_failed`; it could never be analyzed again, even after recovery (reproduced) | incident delivered without analysis, nothing recorded, analyzed on recovery |
+| Provider hangs | up to 600s per try, 3 tries, before the worker moved on | 60s per try (`REQUEST_TIMEOUT_SECONDS`) |
+| A request the API rejects (400, 404, 413, 422) | `analysis_failed` | unchanged: the same request would fail again, so it's a real result |
+
+What the worker does on an outage:
+
+- **Delivers the incident without analysis**, once, as a stdout line with
+  `"analysis": null` and an `"analysis_pending"` reason. The analysis is
+  delivered as a second line when it exists.
+- **Decides nothing.** No decision is written and the claim is released,
+  so the incident's one decision stays available and another worker can
+  take it straight away. The incident is deferred like an over-budget
+  one, holding the cursor so it can't fall out of the query window.
+- **Stops calling the provider for a while.** After a failure, no
+  incident is sent for 30s; each further failure doubles the wait, up to
+  10 minutes; the first success resets it. A long outage costs one failed
+  call per interval, not one per incident per poll.
+- **Counts what was paid for.** An outage after a paid attempt (a reply
+  that failed validation, then a dropped connection) is still recorded as
+  `analysis_failed`, so its tokens count toward the daily budget.
+
+Follow-up questions return `503` with `Retry-After: 60` while the provider
+is unavailable; the incident and its recorded analysis are unaffected.
+The response doesn't say why — a missing key is configuration a client
+doesn't need to learn — but the server log does, and the failed question
+is recorded in the `followups` table like any other failure.
 
 ### Throttling: what gets sent to the AI
 
@@ -325,7 +364,9 @@ invalid reply, then exactly what was wrong with it. A reply cut off at
 the token limit is told so specifically. A provider-level failure (the
 connection itself failing, not a bad reply) is **not** retried —
 retrying the same dead connection with "your response was invalid"
-doesn't make sense, so it fails immediately instead.
+doesn't make sense, so it fails immediately instead. If the provider was
+unavailable (see above), that's `ProviderUnavailableError`, not an
+analysis.
 
 Found and fixed while building this: two malformed shapes — a top-level
 JSON array, and `proposed_action` sent as a string — used to raise an
@@ -336,7 +377,7 @@ got an exception instead of the contract's `analysis_failed` result.
 `int` subclass), and `"0.7"` and whitespace-only `reasoning` were
 accepted too.
 
-Either kind of failure, and running out of retries, produces the same
+Any other failure, and running out of retries, produces the same
 fallback: a stored, visible `CopilotResponse` with
 `proposed_action.type = "analysis_failed"` and `confidence = 0.0` —
 never nothing, and never the same value as a genuine "nothing's wrong"
@@ -415,7 +456,9 @@ python3 worker.py --since 2026-10-10T00:00:00Z --once                     # also
 ```
 
 Each analysis is printed to stdout as one JSON line (`{"incident": ...,
-"analysis": ...}`); logs go to stderr. Every analyzed incident is up to
+"analysis": ...}`); logs go to stderr. While the AI provider is
+unavailable, incidents are printed with `"analysis": null` and an
+`"analysis_pending"` reason instead. Every analyzed incident is up to
 three paid API calls to your Anthropic account — see Throttling above
 for what's sent and how many per hour (`--min-correlated-events`,
 `--max-analyses-per-hour`, `--no-rate-limit`), and Daily token budget for
