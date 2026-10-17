@@ -11,6 +11,11 @@ services:
       - REDIS_URL=${REDIS_URL}
       - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS}
       - LOG_LEVEL=${LOG_LEVEL}
+      # Optional: empty (the default) leaves forwarding off.
+      - DETECTION_ENGINE_URL=${DETECTION_ENGINE_URL:-}
+    extra_hosts:
+      # Lets the container reach a detection-engine running on the host.
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
