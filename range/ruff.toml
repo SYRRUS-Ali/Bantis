@@ -1,3 +1,7 @@
+# Pinned to the oldest Python in CI's test matrix, so which rules apply doesn't
+# change with ruff's own default when ruff is upgraded.
+target-version = "py311"
+
 [lint]
 # B008 flags `Depends(...)` in function argument defaults as a bug, but this
 # is FastAPI's standard, documented dependency-injection pattern (see
