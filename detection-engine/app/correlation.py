@@ -94,7 +94,29 @@ def _build_same_source_incident(group: list[EventORM]) -> IncidentORM:
     )
 
 
-def _find_same_source_incidents(events: list[EventORM], claimed: set[str]) -> list[IncidentORM]:
+def _received(event: EventORM) -> datetime:
+    # received_at is set by this server; timestamp is whatever the producer
+    # claims, so it can't be what decides how long to wait.
+    moment = event.received_at or event.timestamp
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _awaiting_composite_partner(event: EventORM, now: datetime) -> bool:
+    return (
+        _scenario_name(event) in (_COMPOSITE_DEPENDENCY_SCENARIO, _COMPOSITE_SECRET_SCENARIO)
+        and (now - _received(event)).total_seconds() < COMPOSITE_WINDOW_SECONDS
+    )
+
+
+def _burst_is_settled(cluster: list[EventORM], now: datetime) -> bool:
+    quiet = (now - max(_received(e) for e in cluster)).total_seconds() >= SAME_SOURCE_WINDOW_SECONDS
+    held_too_long = (now - min(_received(e) for e in cluster)).total_seconds() >= MAX_HOLD_SECONDS
+    return quiet or held_too_long
+
+
+def _find_same_source_incidents(
+    events: list[EventORM], claimed: set[str], now: datetime | None = None
+) -> list[IncidentORM]:
     incidents: list[IncidentORM] = []
     by_source: dict[str, list[EventORM]] = {}
     for event in events:
@@ -102,12 +124,16 @@ def _find_same_source_incidents(events: list[EventORM], claimed: set[str]) -> li
             continue
         if event.event_type in _SAME_SOURCE_EXCLUDED_EVENT_TYPES:
             continue
+        if now is not None and _awaiting_composite_partner(event, now):
+            continue
         by_source.setdefault(event.source, []).append(event)
 
     for source_events in by_source.values():
         source_events.sort(key=lambda e: e.timestamp)
         for cluster in _cluster_by_gap(source_events, SAME_SOURCE_WINDOW_SECONDS):
             if len(cluster) < 2:
+                continue
+            if now is not None and not _burst_is_settled(cluster, now):
                 continue
             incidents.append(_build_same_source_incident(cluster))
             claimed.update(e.event_id for e in cluster)
@@ -190,7 +216,18 @@ def _find_composite_incidents(events: list[EventORM], claimed: set[str]) -> list
     return incidents
 
 
-def correlate(events: list[EventORM]) -> list[IncidentORM]:
+# Longest a still-growing burst is held back before it's reported anyway.
+MAX_HOLD_SECONDS = 600
+
+
+def correlate(events: list[EventORM], now: datetime | None = None) -> list[IncidentORM]:
+    """Without `now`, the events are treated as complete (a one-off batch).
+    With it, this is one scheduled pass over events still arriving: a burst
+    is reported once no event has joined it for its window (or after
+    MAX_HOLD_SECONDS), and a composite candidate is kept out of bursts while
+    its partner can still arrive. Composites and untrusted-registry pulls
+    are reported as soon as they're seen.
+    """
     events = [e for e in events if not _is_error(e)]
     events = sorted(events, key=lambda e: (e.timestamp, e.event_id))
     claimed: set[str] = set()
@@ -198,14 +235,14 @@ def correlate(events: list[EventORM]) -> list[IncidentORM]:
     incidents: list[IncidentORM] = []
     incidents.extend(_find_composite_incidents(events, claimed))
     incidents.extend(_find_untrusted_registry_incidents(events, claimed))
-    incidents.extend(_find_same_source_incidents(events, claimed))
+    incidents.extend(_find_same_source_incidents(events, claimed, now))
     return incidents
 
 
 _MAX_CORRELATION_ATTEMPTS = 5
 
 
-def _correlate_unclaimed(session: Session) -> list[IncidentORM]:
+def _correlate_unclaimed(session: Session, now: datetime | None = None) -> list[IncidentORM]:
     already_correlated: set[str] = set()
     for incident in session.query(IncidentORM).all():
         already_correlated.update(incident.correlated_event_ids or [])
@@ -217,7 +254,7 @@ def _correlate_unclaimed(session: Session) -> list[IncidentORM]:
         if event.event_id not in already_correlated
     ]
 
-    new_incidents = correlate(events)
+    new_incidents = correlate(events, now)
     for incident in new_incidents:
         session.add(incident)
         for event_id in incident.correlated_event_ids:
@@ -226,10 +263,10 @@ def _correlate_unclaimed(session: Session) -> list[IncidentORM]:
     return new_incidents
 
 
-def run_correlation(session: Session) -> list[IncidentORM]:
+def run_correlation(session: Session, now: datetime | None = None) -> list[IncidentORM]:
     for attempt in range(1, _MAX_CORRELATION_ATTEMPTS + 1):
         try:
-            return _correlate_unclaimed(session)
+            return _correlate_unclaimed(session, now)
         except IntegrityError:
             session.rollback()
             if attempt == _MAX_CORRELATION_ATTEMPTS:

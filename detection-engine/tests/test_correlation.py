@@ -487,3 +487,117 @@ def test_an_event_already_claimed_is_never_correlated_again(db_session):
     db_session.commit()
 
     assert run_correlation(db_session) == []
+
+# ---- Scheduled (incremental) correlation ---------------------------------------
+#
+# A scheduled pass runs while events are still arriving, so it can't treat
+# what it sees as complete the way a one-off batch run can. Each event here
+# arrives (received_at) when it happens.
+
+
+def _arrived(event):
+    event.received_at = event.timestamp
+    return event
+
+
+def _at(seconds):
+    return _T0 + timedelta(seconds=seconds)
+
+
+def _pass(events, seconds, already=()):
+    """One scheduled pass at T0+seconds over the events that have arrived and
+    aren't already in an incident."""
+    taken = {e for incident in already for e in incident.correlated_event_ids}
+    visible = [e for e in events if e.received_at <= _at(seconds) and e.event_id not in taken]
+    return correlate(visible, now=_at(seconds))
+
+
+def test_a_pass_mid_attack_does_not_hand_half_a_composite_to_a_burst():
+    """Batch correlation finds composites first, but a pass that runs before
+    the secret arrives would let the burst rule take the dependency event --
+    and the composite could then never form.
+    """
+    events = [
+        _arrived(_event("ci", "attack-sim", "attack_scenario_run", 0, scenario="compromised-ci-step")),
+        _arrived(_event("dep", "attack-sim", "attack_scenario_run", 10, scenario="malicious-dependency")),
+        _arrived(_event("sec", "attack-sim", "attack_scenario_run", 40, scenario="leaked-secret")),
+    ]
+
+    first = _pass(events, 20)
+    second = _pass(events, 50, already=first)
+
+    assert first == []
+    assert [(i.pattern, sorted(i.correlated_event_ids)) for i in second] == [
+        ("composite-dependency-secret", ["dep", "sec"])
+    ]
+
+
+def test_a_pass_mid_burst_does_not_split_it():
+    events = [
+        _arrived(_event("a", "attack-sim", "attack_scenario_run", 0, scenario="typosquatting")),
+        _arrived(_event("b", "attack-sim", "attack_scenario_run", 10, scenario="compromised-ci-step")),
+        _arrived(_event("c", "attack-sim", "attack_scenario_run", 40, scenario="typosquatting")),
+    ]
+
+    first = _pass(events, 20)
+    second = _pass(events, 40 + SAME_SOURCE_WINDOW_SECONDS + 1, already=first)
+
+    assert first == []
+    assert [sorted(i.correlated_event_ids) for i in second] == [["a", "b", "c"]]
+
+
+def test_a_composite_candidate_without_a_partner_joins_a_burst_once_its_window_closes():
+    events = [
+        _arrived(_event("dep", "attack-sim", "attack_scenario_run", 0, scenario="malicious-dependency")),
+        _arrived(_event("typo", "attack-sim", "attack_scenario_run", 10, scenario="typosquatting")),
+    ]
+
+    assert _pass(events, 100) == []
+    later = _pass(events, COMPOSITE_WINDOW_SECONDS + 1)
+    assert [(i.pattern, sorted(i.correlated_event_ids)) for i in later] == [("same-source-burst", ["dep", "typo"])]
+
+
+def test_a_burst_that_keeps_growing_is_still_reported():
+    """Without a cap, a source sending an event every 50s would hold its own
+    burst open -- and out of the incident list -- indefinitely.
+    """
+    from app.correlation import MAX_HOLD_SECONDS
+
+    events = [
+        _arrived(_event(f"e{n}", "attack-sim", "attack_scenario_run", n * 50, scenario="typosquatting"))
+        for n in range(MAX_HOLD_SECONDS // 50 + 2)
+    ]
+
+    incidents = _pass(events, events[-1].timestamp.timestamp() - _T0.timestamp())
+
+    assert len(incidents) == 1 and len(incidents[0].correlated_event_ids) == len(events)
+
+
+def test_untrusted_registry_pulls_are_reported_without_waiting():
+    events = [_arrived(_image_pull_event("pull", 0, registry="evil.example"))]
+
+    assert [i.pattern for i in _pass(events, 1)] == ["untrusted-registry-pull"]
+
+
+def test_without_a_time_a_pass_is_a_complete_batch_as_before():
+    events = [
+        _arrived(_event("a", "attack-sim", "attack_scenario_run", 0, scenario="typosquatting")),
+        _arrived(_event("b", "attack-sim", "attack_scenario_run", 10, scenario="compromised-ci-step")),
+    ]
+
+    assert [sorted(i.correlated_event_ids) for i in correlate(events)] == [["a", "b"]]
+
+
+def test_a_sender_claiming_future_timestamps_cannot_hold_its_burst_back():
+    """POST /events is unauthenticated and timestamp is the sender's claim;
+    waiting is measured on received_at, which this server sets.
+    """
+    events = []
+    for n, event_id in enumerate(["a", "b"]):
+        event = _event(event_id, "attack-sim", "attack_scenario_run", 3600 + n * 10, scenario="typosquatting")
+        event.received_at = _at(n * 10)
+        events.append(event)
+
+    incidents = correlate(events, now=_at(10 + SAME_SOURCE_WINDOW_SECONDS))
+
+    assert [sorted(i.correlated_event_ids) for i in incidents] == [["a", "b"]]
