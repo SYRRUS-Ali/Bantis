@@ -31,8 +31,8 @@ range/api, nginx, attack-sim
   POST /events  ──validates envelope (app/models.py)──▶  events table
                                                                │
                                                         run_correlation()
-                                                      (manual/script-triggered
-                                                       today — see below)
+                                                      (every 10s, app/scheduler.py
+                                                       — see below)
                                                                │
                                                         incidents table
                                                                │
@@ -41,11 +41,13 @@ range/api, nginx, attack-sim
                          (dashboard — M4+, not built yet)
 ```
 
-**Nothing calls `run_correlation()` automatically today** — no scheduler,
-no trigger on ingestion. It's invoked manually, by
-[`tests/run_m2_baseline.py`](../tests/run_m2_baseline.py), or by a future
-scheduler/webhook; the ingestion and correlation stages are intentionally
-decoupled so a slow correlation pass never blocks an event POST.
+**Correlation runs on a schedule inside the API process**
+(`app/scheduler.py`, every `CORRELATION_INTERVAL_SECONDS`, default 10s).
+It is not triggered by ingestion: the two stages stay decoupled, so a slow
+correlation pass never blocks an event POST. Because a scheduled pass
+sees events still arriving, it waits before forming a burst and keeps
+composite candidates out of bursts while their partner can still arrive
+— see `detection-engine/README.md` for the rules and why.
 
 Ingestion and correlation run as two logically separate stages even
 though they share one database: an event can be ingested and sit
@@ -132,8 +134,8 @@ measured claim, not an assumption:
 
 ## Known limitations
 
-- `run_correlation()` isn't scheduled or triggered automatically (see
-  "Runtime data flow" above).
+- Correlation is periodic, not instant: a burst is reported about 60s
+  after its last event, a composite or untrusted pull within one interval.
 - No authentication on the API (see "API surface" above).
 - `container_image_pull` (Pattern 2) has no real producer yet — the rule
   is defined and tested ahead of that, same staged approach

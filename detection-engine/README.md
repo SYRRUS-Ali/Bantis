@@ -20,6 +20,7 @@ detection-engine/
 │   ├── event_models.py       # EventORM table definition
 │   ├── incident_models.py    # IncidentORM table definition
 │   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's three patterns
+│   ├── scheduler.py            # CorrelationScheduler — runs correlation every CORRELATION_INTERVAL_SECONDS
 │   ├── scorecard.py            # generate_scorecard() — detection rate, false positives, MTTD
 │   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut, IncidentOut/IncidentListOut)
 │   └── routers/
@@ -29,6 +30,7 @@ detection-engine/
 │   ├── test_events_endpoint.py
 │   ├── test_incidents_endpoint.py
 │   ├── test_correlation.py
+│   ├── test_scheduler.py
 │   ├── test_scorecard.py
 │   ├── test_events_concurrency.py
 │   ├── test_init_db.py
@@ -80,11 +82,32 @@ each incident's earliest correlated event and the moment
 [`docs/m2-detection-baseline.md`](../docs/m2-detection-baseline.md) for
 recorded numbers.
 
-**Nothing calls `run_correlation()` automatically yet** — no scheduler,
-no endpoint triggers it on ingestion. It's a function ready to be wired
-in, same staged approach as every other piece of M3 so far (the
-ingestion endpoint existed for a day before either producer was
-connected to it). Run it manually for now:
+**Correlation runs on its own.** `app/scheduler.py` runs a correlation
+pass every `CORRELATION_INTERVAL_SECONDS` (default 10; `0` turns it off)
+in a background thread of the API process, so incidents form without
+anyone calling `run_correlation()`. A failed pass is logged and the next
+one runs anyway. Several processes can run passes at once: the
+`incident_event_claims` key (below) keeps that safe.
+
+A scheduled pass runs while events are still arriving, so it can't treat
+what it sees as complete the way a one-off batch run can. Run naively, it
+lost composites (a pass between `malicious-dependency` and
+`leaked-secret` let the burst rule take the first half) and split bursts
+in two — both reproduced in tests first. So a scheduled pass
+(`run_correlation(session, now=...)`):
+
+- reports composites and untrusted-registry pulls as soon as it sees them;
+- keeps a `malicious-dependency` or `leaked-secret` event out of bursts
+  for the 300s its partner could still arrive in;
+- reports a burst once no event has joined it for 60s, or after 10
+  minutes (`MAX_HOLD_SECONDS`) even if it's still growing, so a source
+  can't keep its own burst out of the incident list.
+
+The waiting is measured on `received_at`, which this server sets, never
+on `timestamp`, which the sender claims. Without `now` (tests, the M2
+baseline) a pass is a complete batch, exactly as before.
+
+To run a pass by hand:
 
 ```python
 from app.db import SessionLocal
@@ -177,9 +200,23 @@ export DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```bash
 cd detection-engine
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload                          # correlates every 10s
+CORRELATION_INTERVAL_SECONDS=0 uvicorn app.main:app    # ingestion and queries only
 curl http://localhost:8000/health
 ```
+
+For the compose range to forward to it, it has to be reachable from a
+container: bind it to the Docker bridge address rather than `0.0.0.0` —
+there's no authentication yet — and set `DETECTION_ENGINE_URL` in
+`range/.env` (see `range/.env.example`):
+
+```bash
+uvicorn app.main:app --host 172.17.0.1 --port 8000     # address from `ip -4 addr show docker0`
+```
+
+All times are UTC: timestamps sent with an offset are converted on the
+way in, `since` is compared as the instant it names, and every time in a
+response carries `Z`.
 
 ## Known issues
 
@@ -332,6 +369,25 @@ same reproduction gives exactly one incident, run after run
 the claim rows makes it fail. Databases created before this have no claim
 rows for existing incidents, so their events are still excluded through
 the incidents' own `correlated_event_ids`.
+
+**Nothing correlated in a live deployment.** Found on 2026-10-17 by
+running the whole chain as separate processes — attack-sim, a live
+detection-engine, the AI Copilot worker — instead of tests that call
+`run_correlation()` themselves: all four scenario events arrived and
+**zero incidents** formed, so the Copilot never had anything to analyze.
+Every test had passed, because every test triggered correlation by hand.
+**Fix:** the scheduler above, plus an end-to-end test in which nothing
+calls correlation (`tests/test_e2e_copilot_auto_analysis.py`).
+
+**Timestamps with an offset were stored hours off.** SQLite keeps no
+offset, so `2026-10-17T09:00:30+03:00` was stored as `09:00:30` instead of
+`06:00:30` UTC. Two events 30s apart from producers in different
+timezones looked 3 hours apart and never correlated (reproduced).
+The same applied to `GET /incidents?since=`: the same instant written as
+`+03:00` returned 0 incidents instead of 2, and a `-05:00` time *after*
+both incidents returned both. Both bundled producers send UTC, so this
+hit only other senders and API clients. **Fix:** every time is converted
+to UTC at the API boundary (`app/models.py`) and served with `Z`.
 
 ## Running the tests
 

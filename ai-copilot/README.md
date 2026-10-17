@@ -326,9 +326,7 @@ steady spending from adding up.
 `--min-correlated-events` later doesn't
 re-evaluate incidents already recorded as skipped. The decision log's
 analyses themselves aren't served over HTTP yet — only follow-ups are —
-and the dashboard will need that. `run_correlation()` itself is still
-not automatic in detection-engine, so an incident only exists for the
-worker to find once something has called it.
+and the dashboard will need that.
 
 ### Prompts (`prompts.py`)
 

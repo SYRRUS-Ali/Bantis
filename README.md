@@ -195,7 +195,7 @@ curl http://localhost:8000/incidents
 ```
 range/api, nginx, attack-sim → POST /events → events table
                                                     │
-                                             run_correlation()
+                                    run_correlation() every 10s
                                                     │
                                              incidents table
                                                     │
@@ -209,9 +209,9 @@ Full component table, data flow, and rules reference:
 
 ### Known limitations
 
-- **`run_correlation()` isn't scheduled or triggered automatically
-  yet** — it's invoked manually or by a test script today; ingestion and
-  correlation are intentionally decoupled stages.
+- **Correlation is periodic, not instant** — detection-engine runs a
+  pass every 10s (`CORRELATION_INTERVAL_SECONDS`); a burst is reported
+  about 60s after its last event so it isn't split in two.
 - **No authentication on the API** — the current trust model assumes a
   single local operator, same as the rest of v1; revisit before this is
   reachable beyond localhost.
