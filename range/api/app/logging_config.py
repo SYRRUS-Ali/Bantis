@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _ALLOWED_URL_SCHEMES = {"http", "https"}
 
@@ -21,7 +21,7 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
