@@ -71,11 +71,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Lint with Ruff
-        run: |
-          pip install ruff
-          ruff check api
-
       - name: Create CI .env file
         run: |
           cat > .env << EOF
@@ -92,6 +87,13 @@ jobs:
           CACHE_TTL_SECONDS=60
           COMPOSE_PROFILES=range
           EOF
+
+      - name: Lint with Ruff
+        # Pinned: an unpinned linter fails builds on code nobody changed the
+        # day it ships a new rule. Upgrade it deliberately.
+        run: |
+          pip install ruff==0.17.1
+          ruff check api
 
       - name: Start the range stack
         run: docker compose up --build -d
