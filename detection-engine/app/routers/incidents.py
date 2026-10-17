@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.event_models import EventORM
 from app.incident_models import IncidentORM
-from app.models import EventOut, IncidentListOut, IncidentOut
+from app.models import EventOut, IncidentListOut, IncidentOut, as_utc
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -33,7 +33,7 @@ def list_incidents(
     if pattern is not None:
         query = query.filter(IncidentORM.pattern == pattern)
     if since is not None:
-        query = query.filter(IncidentORM.created_at >= since)
+        query = query.filter(IncidentORM.created_at >= as_utc(since))
 
     total = query.count()
     items = (

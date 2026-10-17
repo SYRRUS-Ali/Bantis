@@ -99,3 +99,27 @@ def test_ingest_event_accepts_every_real_log_level(client, level):
     response = client.post("/events", json=event)
 
     assert response.status_code == 201
+
+def test_a_timestamp_with_an_offset_is_stored_and_served_as_utc(client):
+    event = dict(_VALID_EVENT, timestamp="2026-09-24T15:00:30+03:00")
+
+    body = client.post("/events", json=event).json()
+
+    assert body["timestamp"] == "2026-09-24T12:00:30Z"
+    assert body["received_at"].endswith("Z")
+
+
+def test_events_from_producers_in_different_timezones_still_correlate(client):
+    """SQLite drops the offset on storage: un-normalized, these two events
+    30s apart were stored 3 hours apart and never formed an incident.
+    """
+    from app.correlation import run_correlation
+    from app.db import SessionLocal
+
+    client.post("/events", json=dict(_VALID_EVENT, event_id="utc", timestamp="2026-09-24T12:00:00Z"))
+    client.post("/events", json=dict(_VALID_EVENT, event_id="plus3", timestamp="2026-09-24T15:00:30+03:00"))
+
+    with SessionLocal() as session:
+        incidents = run_correlation(session)
+
+    assert [sorted(i.correlated_event_ids) for i in incidents] == [["plus3", "utc"]]

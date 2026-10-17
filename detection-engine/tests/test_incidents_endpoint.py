@@ -232,3 +232,19 @@ def test_get_incident_events_returns_404_for_an_unknown_incident(client):
     response = client.get("/incidents/does-not-exist/events")
 
     assert response.status_code == 404
+
+@pytest.mark.parametrize("offset_hours", [0, 3, -5])
+def test_since_means_the_same_instant_whatever_its_offset(client, offset_hours):
+    _seed_incident("before", created_at=_T0 - timedelta(minutes=5))
+    _seed_incident("after", created_at=_T0 + timedelta(minutes=5))
+    since = _T0.astimezone(timezone(timedelta(hours=offset_hours))).isoformat()
+
+    response = client.get("/incidents", params={"since": since})
+
+    assert [i["incident_id"] for i in response.json()["items"]] == ["after"]
+
+
+def test_incident_times_are_served_as_utc(client):
+    _seed_incident("inc-1")
+
+    assert client.get("/incidents/inc-1").json()["created_at"] == "2026-10-04T12:00:00Z"
