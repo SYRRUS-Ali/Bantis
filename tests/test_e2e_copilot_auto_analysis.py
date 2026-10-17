@@ -15,8 +15,10 @@ _FAKE_SECRET = "AKIAFAKEBANTISATSIM1"
 
 
 @pytest.fixture
-def live_detection_engine(tmp_path, monkeypatch):
+def live_detection_engine(request, tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/e2e.db")
+    # "0": the test correlates by hand. Parametrize to run the real scheduler.
+    monkeypatch.setenv("CORRELATION_INTERVAL_SECONDS", getattr(request, "param", "0"))
 
     import uvicorn
 
@@ -145,3 +147,34 @@ def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_e
     assert not log.has_incident(old_incident)
     assert log.verify() == []
     assert _FAKE_SECRET.encode() not in log_path.read_bytes()
+
+
+@pytest.mark.parametrize("live_detection_engine", ["0.2"], indirect=True)
+def test_with_no_one_calling_correlation_the_copilot_still_gets_the_incident(live_detection_engine, tmp_path):
+    """The deployed path end to end: events in, detection-engine's own
+    scheduler correlates, the worker analyzes. Before the scheduler
+    existed, this exact setup produced no incident at all.
+    """
+    from decision_log import DecisionLog
+    from detection_client import DetectionEngineClient
+    from worker import CopilotWorker
+
+    provider = RecordingProvider()
+    delivered = []
+    worker = CopilotWorker(
+        DetectionEngineClient(live_detection_engine),
+        provider,
+        on_result=lambda incident, response: delivered.append(incident["pattern"]),
+        decision_log=DecisionLog(tmp_path / "decisions.db"),
+    )
+
+    _post_event(live_detection_engine, "dep-1", "malicious-dependency", "T1195.001", artifact="fake==0.0.0")
+    _post_event(live_detection_engine, "sec-1", "leaked-secret", "T1552.001", artifact="config.py")
+
+    deadline = time.monotonic() + 10
+    while not delivered and time.monotonic() < deadline:
+        worker.poll_once()
+        time.sleep(0.2)
+
+    assert delivered == ["composite-dependency-secret"]
+    assert [e.event_id for e in provider.requests[0].evidence_timeline] == ["dep-1", "sec-1"]

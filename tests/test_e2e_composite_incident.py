@@ -18,6 +18,7 @@ _DETECTION_ENGINE_URL = f"http://127.0.0.1:{_PORT}"
 @pytest.fixture
 def live_detection_engine(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/e2e.db")
+    monkeypatch.setenv("CORRELATION_INTERVAL_SECONDS", "0")  # this test correlates by hand
 
     import uvicorn
 

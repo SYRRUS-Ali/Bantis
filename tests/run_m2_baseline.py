@@ -38,6 +38,9 @@ jobs:
 
 def _start_detection_engine(tmp_dir: Path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_dir / 'baseline.db'}"
+    # The baseline runs one batch correlation after all four scenarios, so the
+    # numbers are comparable run to run; the live scheduler would race it.
+    os.environ["CORRELATION_INTERVAL_SECONDS"] = "0"
 
     import uvicorn
 
