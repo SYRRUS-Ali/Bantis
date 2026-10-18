@@ -6,7 +6,10 @@ proposed next step, always subject to human approval. The exact
 input/output shape and the security constraints this component must
 honor are fixed in
 [`docs/ai-copilot-contract.md`](../docs/ai-copilot-contract.md) — this
-directory implements that contract, not a different one.
+directory implements that contract, not a different one. How the pieces
+fit together, and how the recommend-only principle is enforced layer by
+layer, is in
+[`docs/ai-copilot-architecture.md`](../docs/ai-copilot-architecture.md).
 
 This is a separate, independently-deployable component, same
 relationship `range/`, `attack-sim/`, and `detection-engine/` already
@@ -43,6 +46,7 @@ ai-copilot/
 │   ├── test_followup_api.py
 │   ├── test_budget.py
 │   ├── test_prompts.py
+│   ├── test_recommend_only.py   # fails if any code path to act on another component appears
 │   └── test_claude_provider.py
 └── requirements.txt
 ```
@@ -390,7 +394,10 @@ through to the same `analysis_failed` path as a malformed reply. This
 is [ADR 0004](../docs/adr/0004-recommend-only-default.md)'s decision
 made structurally impossible to bypass by a future caller forgetting to
 check a flag: there is no code path in this component, today, that
-executes a proposed action at all.
+executes a proposed action at all. `tests/test_recommend_only.py` keeps
+that true: it fails if the component gains a process runner, a
+non-`GET` request to detection-engine, or a new API route. All layers:
+[`docs/ai-copilot-architecture.md#how-the-code-makes-it-hold`](../docs/ai-copilot-architecture.md#how-the-code-makes-it-hold).
 
 ## How to use it
 

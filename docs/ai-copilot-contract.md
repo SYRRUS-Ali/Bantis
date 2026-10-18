@@ -189,6 +189,10 @@ count and the last validation error as the reason.
 
 ## Security constraints
 
+How each constraint below is enforced in code, and what it does and
+doesn't protect against:
+[`docs/ai-copilot-architecture.md`](ai-copilot-architecture.md#the-recommend-only-principle).
+
 1. **Recommend-only, always (ADR 0004).** `requires_approval` is
    hard-coded `true` for every response in v1; it is not a value the AI
    returns, and validation rejects any response that tries to set it to
