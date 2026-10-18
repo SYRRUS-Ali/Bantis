@@ -226,6 +226,60 @@ Full component table, data flow, and rules reference:
   Worth reading before assuming the correlation rules were right on the
   first try.
 
+## M4: AI Copilot
+
+🚧 In progress — the Copilot analyzes every new correlated incident
+automatically, records how it reached each conclusion, and answers
+follow-up questions. It **only recommends**: no code in it can change
+anything, and every proposed action requires a human's approval
+([ADR 0004](docs/adr/0004-recommend-only-default.md)).
+
+### What's in it
+
+- **Automatic analysis** (`ai-copilot/worker.py`): polls detection-engine
+  read-only and sends each new correlated incident to the AI model, most
+  severe first, within an hourly limit and a daily token budget.
+- **A strict trust boundary**: only allowlisted fields reach the AI
+  provider, never raw tool output or secrets; incident data is fenced as
+  untrusted; model output is validated before anything is recorded.
+- **A decision log**: every analysis and follow-up, with the exact prompt
+  and every model attempt, in an append-only, hash-chained SQLite file.
+- **Follow-up questions** (`ai-copilot/api.py`): an authenticated API to
+  ask about an analyzed incident, answered only from what was recorded.
+- **Graceful degradation**: without a key or with the provider down,
+  incidents are still delivered, without an analysis, and analyzed later.
+
+### How to run it
+
+```bash
+cd ai-copilot
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 worker.py --detection-engine-url http://localhost:8000
+```
+
+### Architecture (short version)
+
+```
+detection-engine incidents ──GET──▶ worker ──allowlist──▶ AI provider
+                                       │                      │
+                                       ▼       validated      │
+                                  decision log ◀──────────────┘
+                                       ▲
+                     operator ──▶ api.py (follow-up questions)
+```
+
+Full architecture and the recommend-only principle in detail:
+[`docs/ai-copilot-architecture.md`](docs/ai-copilot-architecture.md).
+
+### Known limitations
+
+- **No approval workflow or dashboard yet** — recommendations reach the
+  operator as JSON lines and through `decision_log.py show`.
+- **Prompt injection is reduced, not prevented** — recommend-only bounds
+  a successful one to a misleading recommendation a person reviews.
+- **Explanation quality is not yet scored** against real model output.
+
 ## License
 
 MIT
