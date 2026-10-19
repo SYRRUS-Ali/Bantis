@@ -228,11 +228,14 @@ Full component table, data flow, and rules reference:
 
 ## M4: AI Copilot
 
-🚧 In progress — the Copilot analyzes every new correlated incident
+🚧 Sprint 4 closed — the Copilot analyzes every new correlated incident
 automatically, records how it reached each conclusion, and answers
 follow-up questions. It **only recommends**: no code in it can change
 anything, and every proposed action requires a human's approval
-([ADR 0004](docs/adr/0004-recommend-only-default.md)).
+([ADR 0004](docs/adr/0004-recommend-only-default.md)). What it does not
+do yet — notably, the real model's explanations have not been scored,
+and detection-engine still has no authentication — is in
+[`docs/m4-closure.md`](docs/m4-closure.md).
 
 ### What's in it
 
