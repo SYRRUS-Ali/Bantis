@@ -1,0 +1,8 @@
+target-version = "py311"
+
+[lint]
+# BLE001 flags `except Exception`. Here it is the point: the kill switch
+# fails closed (any error reading it means stop), and the executor turns
+# any error from an action or a recorder into a failed outcome plus a
+# tripwire instead of letting it escape mid-action.
+ignore = ["BLE001"]
