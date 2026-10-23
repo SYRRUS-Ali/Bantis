@@ -353,6 +353,14 @@ in a new ADR:
 - **What stops a burst of approvals or actions?** Rate limits and a way
   to halt execution entirely.
 
+A proposed answer to all five — a separate response controller, a
+three-tier action catalog, a hash-bound approval flow and a fail-closed
+kill switch — is [ADR 0006](adr/0006-response-actions-and-kill-switch.md)
+(**Proposed**, not implemented), detailed in
+[`response-controller-design.md`](response-controller-design.md). The
+AI stays outside the action path in that design, so this component
+keeps no capability either way.
+
 ---
 
 ## Data handling and trust boundaries
