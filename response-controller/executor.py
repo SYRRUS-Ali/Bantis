@@ -114,11 +114,15 @@ class Executor:
             why = "approval required" if tier == Tier.APPROVAL else "auto-execution is off; approval required"
             return done(Status.AWAITING_APPROVAL, f"{why}: {len(approvers)} of {proposal.required_approvals}")
 
-        problems = action.preconditions(proposal, params)
+        try:
+            problems = action.preconditions(proposal, params)
+            plan = None if problems else action.plan(proposal, params)
+        except Exception as exc:
+            logger.exception("checking %s (%s) raised", proposal.action_id, proposal.type)
+            return done(Status.INVALIDATED, f"could not check preconditions: {type(exc).__name__}: {exc}")
         if problems:
             return done(Status.INVALIDATED, *problems)
 
-        plan = action.plan(proposal, params)
         if self._config.dry_run:
             return done(Status.DRY_RUN, plan=plan)
 

@@ -264,3 +264,19 @@ def test_a_switch_engaged_after_the_checks_still_stops_an_action_that_never_chec
 
     assert executor.run(proposal(), now=NOW).status == Status.INVALIDATED
     assert action.done_steps == []
+
+@pytest.mark.parametrize("method", ["preconditions", "plan"])
+def test_an_error_while_checking_invalidates_without_acting_or_tripping(clear, method):
+    action = FakeAction()
+
+    def broken(*args):
+        raise ConnectionError("GitHub unreachable")
+
+    setattr(action, method, broken)
+    executor, _ = make(clear, [action])
+
+    outcome = executor.run(proposal(), now=NOW)
+
+    assert outcome.status == Status.INVALIDATED and "GitHub unreachable" in outcome.reasons[0]
+    assert action.done_steps == []
+    assert read_state(clear).level == Level.CLEAR
