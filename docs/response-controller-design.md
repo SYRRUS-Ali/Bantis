@@ -1,10 +1,12 @@
 # Response Controller Design: Whitelist, Approval Flow, Kill Switch
 
-**Status: design — nothing here is implemented.** Bantis is
-recommend-only today ([ADR 0004](adr/0004-recommend-only-default.md)),
-and stays so until [ADR 0006](adr/0006-response-actions-and-kill-switch.md)
-is accepted **and** the gates below are met. This document is what that
-ADR decides on.
+**Status: design; skeleton built.** Bantis is recommend-only today
+([ADR 0004](adr/0004-recommend-only-default.md)), and stays so until
+[ADR 0006](adr/0006-response-actions-and-kill-switch.md) is accepted
+**and** the gates below are met. This document is what that ADR decides
+on. [`response-controller/`](../response-controller/README.md) has the
+action interface, catalog, kill switch and executor rules — and no
+concrete action, so it can't act on anything yet.
 
 It answers the five questions
 [`ai-copilot-architecture.md`](ai-copilot-architecture.md#changing-the-principle)
@@ -260,12 +262,15 @@ actions" is to stop, not to keep going more slowly.
 
 ### Mechanism
 
-- **State lives in one file** (`$BANTIS_STATE_DIR/kill-switch`). It is
-  owned by the operator; the controller and the Copilot can read it,
-  not write it. The file holds the level, who set it, when, and why.
-- **Fail closed.** A missing state directory, a permission error, an
-  unparseable file, or an unknown level are all treated as
-  `execution-off` + `ai-off`. Only a readable file saying `clear` allows
+- **State lives in two files** in `$BANTIS_STATE_DIR`. `kill-switch` is
+  the operator's: the controller and the Copilot can read it, not write
+  it. `kill-switch.tripped` is the only file the controller can write,
+  for its tripwires, and it can only add restriction. The effective
+  state is the more restrictive of the two. Each holds the level, who
+  set it, when, and why.
+- **Fail closed.** A missing state directory or operator file, a
+  permission error, an unparseable file, or an unknown level are all
+  treated as `execution-off` + `ai-off`. Only a readable file saying `clear` allows
   execution.
 - **Checked at the last moment.** The executor reads the switch
   immediately before every external call, not once per poll. A
@@ -282,8 +287,8 @@ actions" is to stop, not to keep going more slowly.
 | Approval | None — stopping must never wait | Required, and recorded |
 | Works when | The controller is down, the network is down, the log is unreachable | The controller and its action log are healthy |
 
-Resuming takes the switch to `clear` **and** invalidates every approval
-granted before or during the stop.
+Resuming takes the switch to `clear`, removes `kill-switch.tripped`,
+**and** invalidates every approval granted before or during the stop.
 
 ### Automatic tripwires
 
