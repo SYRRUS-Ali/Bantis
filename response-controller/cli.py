@@ -16,7 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     kill.add_argument("--level", choices=[Level.AUTO_OFF.value, Level.EXECUTION_OFF.value], default=Level.EXECUTION_OFF.value)
     kill.add_argument("--ai-off", action="store_true", help="Also stop the AI Copilot's model calls.")
     kill.add_argument("--reason", required=True)
+    commands.add_parser("promotion-hold", help="Show whether a CI promotion hold (quarantine) is active. Read-only.")
     args = parser.parse_args(argv)
+
+    if args.command == "promotion-hold":
+        return _show_promotion_hold()
 
     try:
         config = from_env()
@@ -36,6 +40,27 @@ def main(argv: list[str] | None = None) -> int:
     print(f"mode: {'dry run' if config.dry_run else 'LIVE'}")
     return 0
 
+
+def _show_promotion_hold() -> int:
+    from actions.promotion_hold import HOLD_VARIABLE
+    from github_client import GitHubError
+    from wiring import promotion_client
+
+    try:
+        client = promotion_client()
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if client is None:
+        print("RESPONSE_GITHUB_REPO and RESPONSE_GITHUB_TOKEN_PROMOTION are not set", file=sys.stderr)
+        return 2
+    try:
+        value = client.get(HOLD_VARIABLE)
+    except GitHubError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f"{client.repo}: " + (f"HELD — {value}" if value is not None else "no hold; promotions run normally"))
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

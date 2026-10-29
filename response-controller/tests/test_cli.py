@@ -22,3 +22,25 @@ def test_there_is_no_resume_command_yet(tmp_path, monkeypatch):
     monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
     with pytest.raises(SystemExit):
         main(["resume", "--reason", "x"])
+
+def test_promotion_hold_status_is_read_only(monkeypatch, capsys):
+    from fake_github import TOKEN, FakeGitHub
+
+    github = FakeGitHub()
+    try:
+        github.variables["BANTIS_PROMOTION_HOLD"] = "bantis-hold incident=inc-1 action=act_1"
+        monkeypatch.setenv("RESPONSE_GITHUB_REPO", github.repo)
+        monkeypatch.setenv("RESPONSE_GITHUB_TOKEN_PROMOTION", TOKEN)
+        monkeypatch.setenv("RESPONSE_GITHUB_API_URL", github.url)
+
+        assert main(["promotion-hold"]) == 0
+        assert "HELD — bantis-hold incident=inc-1" in capsys.readouterr().out
+        assert github.writes() == []
+    finally:
+        github.close()
+
+
+def test_promotion_hold_status_needs_credentials(monkeypatch, capsys):
+    monkeypatch.delenv("RESPONSE_GITHUB_REPO", raising=False)
+    monkeypatch.delenv("RESPONSE_GITHUB_TOKEN_PROMOTION", raising=False)
+    assert main(["promotion-hold"]) == 2
