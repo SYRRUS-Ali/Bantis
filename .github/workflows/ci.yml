@@ -365,7 +365,7 @@ jobs:
     name: Promote to Latest
     runs-on: ubuntu-latest
     needs: [push, deploy-staging]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BANTIS_PROMOTION_HOLD == ''
     timeout-minutes: 5
     permissions:
       contents: read
@@ -386,6 +386,25 @@ jobs:
           docker pull "ghcr.io/${IMAGE_NAME}:${SHA}"
           docker tag "ghcr.io/${IMAGE_NAME}:${SHA}" "ghcr.io/${IMAGE_NAME}:latest"
           docker push "ghcr.io/${IMAGE_NAME}:latest"
+
+  promotion-held:
+    name: Promotion Held (Bantis quarantine)
+    runs-on: ubuntu-latest
+    needs: [push, deploy-staging]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BANTIS_PROMOTION_HOLD != ''
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Report the hold
+        env:
+          HOLD: ${{ vars.BANTIS_PROMOTION_HOLD }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Keep only identifier characters: the value must not be able to
+          # inject workflow commands into this log.
+          SAFE_HOLD=$(printf '%s' "$HOLD" | tr -cd 'A-Za-z0-9 ._=-')
+          echo "::warning title=Promotion held::latest was not updated to ${SHA}. ${SAFE_HOLD}"
+          echo "Lift the hold only after review: lift_promotion_hold, which needs approval."
 
   rollback:
     name: Rollback to Previous Image
@@ -455,11 +474,17 @@ jobs:
           R_PUSH: ${{ needs.push.result }}
           R_DEPLOY_STAGING: ${{ needs.deploy-staging.result }}
           R_PROMOTE_LATEST: ${{ needs.promote-latest.result }}
+          PROMOTION_HELD: ${{ vars.BANTIS_PROMOTION_HOLD != '' }}
         run: |
           RESULTS="$R_BUILD $R_TEST $R_SAST $R_SECRETS_SCAN $R_DEPENDENCY_SCAN $R_ATTACK_SIM $R_PUSH $R_DEPLOY_STAGING $R_PROMOTE_LATEST"
           if echo "$RESULTS" | grep -q "failure"; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
             echo "emoji=❌" >> "$GITHUB_OUTPUT"
+          elif [ "$PROMOTION_HELD" = "true" ]; then
+            # Not a success: the build passed, but a quarantine kept it
+            # from becoming :latest. Say so instead of a green tick.
+            echo "status=held" >> "$GITHUB_OUTPUT"
+            echo "emoji=🔒" >> "$GITHUB_OUTPUT"
           else
             echo "status=success" >> "$GITHUB_OUTPUT"
             echo "emoji=✅" >> "$GITHUB_OUTPUT"
@@ -511,7 +536,7 @@ jobs:
           By: ${ACTOR}
           Run: ${RUN_URL}"
 
-          if [ "${STATUS_TEXT}" = "failure" ]; then
+          if [ "${STATUS_TEXT}" != "success" ]; then
             MESSAGE="${MESSAGE}
 
           *Job report:*
