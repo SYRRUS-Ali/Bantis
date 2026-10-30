@@ -5,8 +5,10 @@
 [ADR 0006](adr/0006-response-actions-and-kill-switch.md) is accepted
 **and** the gates below are met. This document is what that ADR decides
 on. [`response-controller/`](../response-controller/README.md) has the
-action interface, catalog, kill switch and executor rules — and no
-concrete action, so it can't act on anything yet.
+action interface, catalog, kill switch and executor rules, and the first
+action: A3 `hold_promotion` with its undo B3, plus the CI change below.
+Nothing is enabled by default, and nothing should be enabled live before
+the gates are met.
 
 It answers the five questions
 [`ai-copilot-architecture.md`](ai-copilot-architecture.md#changing-the-principle)
@@ -112,9 +114,9 @@ Notes:
   text goes into it: event fields can carry attacker-written content, and
   a notification is not a place to render it. Sent as plain text, not
   Markdown.
-- **A3 needs one change to CI:** `promote-latest` gains the condition
-  `vars.BANTIS_PROMOTION_HOLD != 'true'`. Today nothing checks the
-  variable, so setting it would do nothing.
+- **A3's CI change is in place:** `promote-latest` runs only while
+  `vars.BANTIS_PROMOTION_HOLD` is empty; a `Promotion Held` job warns on
+  the run instead, and the notification reports `held`.
 - **A3 holds rather than reverts.** It stops the next promotion, which is
   reversible and leaves production as it is. Reverting what is already
   `:latest` is B1, a separate, approved decision. A hold that lifted

@@ -1,21 +1,24 @@
 # response-controller
 
-The skeleton of the response controller designed in
+The response controller designed in
 [`docs/response-controller-design.md`](../docs/response-controller-design.md)
 under [ADR 0006](../docs/adr/0006-response-actions-and-kill-switch.md)
 (**Proposed**). It is a separate component from `ai-copilot/`, which
 keeps no capability to act.
 
 **What exists:** the general interface every action implements, the
-closed catalog, the proposal and approval model, the kill switch, and an
-executor that enforces the design's rules in order.
+closed catalog, the proposal and approval model, the kill switch, an
+executor that enforces the design's rules in order, and the first real
+action: the CI quarantine (`hold_promotion`) with its undo
+(`lift_promotion_hold`).
 
-**What doesn't:** any concrete action. No action is implemented, nothing
-is enabled by default, and the default mode is dry run, so nothing in
-this directory can affect anything outside its state directory. Each
-real action, the hash-chained action log (G2), the policy that turns
-incidents into proposals, and the approver-authenticated `resume` and
-`approve` commands are separate, later steps.
+**What doesn't:** the hash-chained action log (G2), the policy that
+turns incidents into proposals, the approver-authenticated `resume` and
+`approve` commands, and the other four actions. Nothing is enabled by
+default and the default mode is dry run. **Don't enable anything live
+until the gates in the design are met** — above all G1, authenticated
+ingestion in detection-engine: until then, anyone who can post an event
+could trigger a quarantine and freeze releases.
 
 ## Structure
 
@@ -26,9 +29,12 @@ response-controller/
 ├── actions/base.py     # Action: the interface every action implements; ActionParams; StepGuard
 ├── registry.py         # catalog type → implementation; refuses anything outside the catalog
 ├── executor.py         # decides whether a proposal may run, and runs it; Recorder protocol
+├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
+├── github_client.py    # repository-variables API only; https only; the token never reaches a message
+├── wiring.py           # builds the registry, one credential per capability
 ├── kill_switch.py      # read_state (fail closed), engage (operator), trip (tripwires)
 ├── config.py           # state directory, enabled actions, dry run — from the environment
-├── cli.py              # `status`, `kill`
+├── cli.py              # `status`, `kill`, `promotion-hold` (read-only)
 ├── ruff.toml
 └── tests/
 ```
@@ -69,6 +75,64 @@ before any effectful method is called:
 13. Verification. A failed or raising post-check, or an action that
     raises, trips the switch to `execution-off`.
 
+## The CI quarantine (`hold_promotion`)
+
+The first real action, tier A. It quarantines the CI pipeline's output:
+it sets the repository variable `BANTIS_PROMOTION_HOLD`, and while that
+is set, CI's `promote-latest` job skips, so **no build — including the
+suspect one — becomes `:latest`**. Instead, a `Promotion Held` job puts
+a warning on the run, and the Telegram notification says 🔒 `held`
+instead of ✅ `success`.
+
+Why it qualifies for auto-execution (design, "Eligibility"):
+
+- **It holds, it doesn't remove.** Running services and published
+  images are untouched. Reverting `:latest` is `rollback_latest`, a
+  separate decision that needs approval.
+- **One fixed target.** The repository comes from configuration and the
+  variable name is a constant. A proposal can't carry parameters at all
+  (`NoParams`), so nothing in an incident can choose what is written
+  where. The only proposal data in the value, the incident and action
+  ids, must be plain identifiers.
+- **Idempotent, and never overwrites.** If a hold already exists —
+  this one after a retry, or another one — it's left as is. The design
+  allows at most one active hold, so a second quarantine is
+  `invalidated` while one is active.
+- **Verified.** After writing, the variable is read back. If it isn't
+  there, the action fails and trips the kill switch.
+- **A tested undo.** `lift_promotion_hold` deletes the variable. It is
+  tier B: a hold never lifts itself, and lifting one always needs an
+  approval.
+
+Failure behavior:
+
+| What happens | Outcome |
+|---|---|
+| GitHub unreachable or erroring while checking | `invalidated`; nothing written; switch not tripped |
+| GitHub rejects the write (e.g. 403: wrong token scope) | `failed`; kill switch trips to `execution-off` |
+| The write didn't stick (read-back fails) | `failed`; kill switch trips |
+| Kill switch engaged | `invalidated` before any request to GitHub |
+
+**The credential** is a fine-grained personal access token limited to
+this one repository, with only **Variables: Read and write**. It needs no
+contents, actions, secrets or admin access. If it leaks, the worst it
+can do is set or remove repository variables.
+
+```bash
+export RESPONSE_GITHUB_REPO=owner/repo
+export RESPONSE_GITHUB_TOKEN_PROMOTION=github_pat_...   # Variables: read and write, this repo only
+python3 cli.py promotion-hold                           # read-only: is a quarantine active?
+```
+
+If a hold must be lifted while `approve` doesn't exist yet, the operator
+can delete the variable in GitHub (Settings → Secrets and variables →
+Actions → Variables). That is the same effect as `lift_promotion_hold`,
+done by hand.
+
+All of it is tested against a local stand-in for GitHub's API
+(`tests/fake_github.py`), with the real HTTP client, so no test touches
+a real repository.
+
 ## The kill switch
 
 | File (in `$BANTIS_STATE_DIR`) | Written by | Can |
@@ -106,6 +170,9 @@ can't cause anything to run.
 | `BANTIS_STATE_DIR` | none — required | Holds the kill switch |
 | `RESPONSE_ENABLED_ACTIONS` | empty | Comma-separated catalog names; anything else fails at startup |
 | `RESPONSE_DRY_RUN` | `true` | Only `false` makes execution live |
+| `RESPONSE_GITHUB_REPO` | none | `owner/name` the promotion hold applies to |
+| `RESPONSE_GITHUB_TOKEN_PROMOTION` | none | Fine-grained token: this repo, *Variables: write* only |
+| `RESPONSE_GITHUB_API_URL` | `https://api.github.com` | https only (plain http only to loopback, for tests) |
 
 ## Separation from the AI
 
