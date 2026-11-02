@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hmac
+import json
+import os
+import pwd
+import sqlite3
+import stat
 import sys
+from contextlib import closing
+from pathlib import Path
 
 from config import ConfigError, from_env
 from kill_switch import Level, engage, read_state
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Bantis response controller: kill switch and status.")
+    parser = argparse.ArgumentParser(description="Bantis response controller: manual review, kill switch and status.")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="Show the effective kill switch state.")
     kill = commands.add_parser("kill", help="Engage the kill switch. No approval needed.")
@@ -17,6 +25,19 @@ def main(argv: list[str] | None = None) -> int:
     kill.add_argument("--ai-off", action="store_true", help="Also stop the AI Copilot's model calls.")
     kill.add_argument("--reason", required=True)
     commands.add_parser("promotion-hold", help="Show whether a CI promotion hold (quarantine) is active. Read-only.")
+    propose = commands.add_parser("propose", help="Queue a policy proposal from a JSON file; never executes it.")
+    propose.add_argument("file", type=Path)
+    commands.add_parser("pending", help="List proposals awaiting manual review.")
+    show = commands.add_parser("show", help="Show a proposal, its hash, status and decision history.")
+    show.add_argument("action_id")
+    for decision in ("approve", "modify", "dismiss"):
+        command = commands.add_parser(decision, help=f"{decision.capitalize()} one exact proposal (operator authentication required).")
+        command.add_argument("action_id")
+        command.add_argument("hash_prefix", help="At least the first 12 characters of the displayed proposal hash.")
+        if decision != "approve":
+            command.add_argument("--reason", required=True)
+        if decision == "modify":
+            command.add_argument("--params-file", type=Path, required=True, help="JSON object replacing the action parameters.")
     args = parser.parse_args(argv)
 
     if args.command == "promotion-hold":
@@ -27,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 2
+
+    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss"}:
+        return _review(args, config)
 
     if args.command == "kill":
         engage(config.state_dir, Level(args.level), args.reason, getpass.getuser(), ai_off=args.ai_off)
@@ -39,6 +63,74 @@ def main(argv: list[str] | None = None) -> int:
     print(f"enabled actions: {', '.join(sorted(config.enabled_actions)) or 'none'}")
     print(f"mode: {'dry run' if config.dry_run else 'LIVE'}")
     return 0
+
+
+def _authenticate() -> str:
+    """Host identity plus a separate, operator-owned secret; never a CLI argument."""
+    secret_path = os.environ.get("RESPONSE_APPROVER_SECRET_FILE")
+    if not secret_path:
+        raise ValueError("RESPONSE_APPROVER_SECRET_FILE must name this operator's private secret file")
+    with Path(secret_path).open() as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("approver secret must be an operator-owned file with mode 0600 or 0400")
+        expected = source.read().strip()
+    if not expected:
+        raise ValueError("approver secret file is empty")
+    supplied = getpass.getpass("Approver secret: ")
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise ValueError("operator authentication failed")
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _review(args, config) -> int:
+    from approval_flow import ApprovalFlow, ReviewStore
+    from executor import Executor
+    from models import Proposal, Status
+    from wiring import build_registry
+
+    try:
+        actor = _authenticate() if args.command in {"approve", "modify", "dismiss"} else None
+        registry = build_registry()
+        with closing(ReviewStore(config.state_dir / "reviews.sqlite3")) as store:
+            flow = ApprovalFlow(store, Executor(registry, config, store), registry)
+            if args.command == "propose":
+                proposal = flow.submit(Proposal.model_validate_json(args.file.read_text()),
+                                       actor=pwd.getpwuid(os.getuid()).pw_name)
+                _print_proposal(proposal, "pending")
+            elif args.command == "pending":
+                proposals = store.pending()
+                for proposal in proposals:
+                    print(f"{proposal.action_id}  {proposal.type}  {proposal.proposal_hash[:12]}  expires {proposal.expires_at.isoformat()}")
+                if not proposals:
+                    print("No pending proposals.")
+            elif args.command == "show":
+                proposal, status = store.get(args.action_id)
+                _print_proposal(proposal, status)
+                print(json.dumps({"history": store.history(args.action_id)}, indent=2))
+            elif args.command == "approve":
+                outcome = flow.approve(args.action_id, args.hash_prefix, actor)
+                print(outcome.model_dump_json(indent=2))
+                return 0 if outcome.status in {Status.SUCCEEDED, Status.DRY_RUN, Status.AWAITING_APPROVAL} else 1
+            elif args.command == "modify":
+                params = json.loads(args.params_file.read_text())
+                if not isinstance(params, dict):
+                    raise ValueError("parameters must be a JSON object")
+                proposal = flow.modify(args.action_id, args.hash_prefix, actor, params, args.reason)
+                _print_proposal(proposal, "pending")
+                print("Previous proposal closed; fresh approval required.")
+            else:
+                flow.dismiss(args.action_id, args.hash_prefix, actor, args.reason)
+                print(f"{args.action_id}: dismissed; no action executed.")
+        return 0
+    except (ValueError, OSError, sqlite3.Error, EOFError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def _print_proposal(proposal, status: str) -> None:
+    print(json.dumps({**proposal.model_dump(mode="json"), "proposal_hash": proposal.proposal_hash,
+                      "status": status}, indent=2))
 
 
 def _show_promotion_hold() -> int:
