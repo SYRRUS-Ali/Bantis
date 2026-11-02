@@ -184,6 +184,16 @@ output), the undo, and any provenance warning.
 
 ### States
 
+The local CLI implementation is documented in
+[`response-controller/README.md`](../response-controller/README.md#manual-review-approve--modify--dismiss).
+It persists proposals and authenticated Approve / Modify / Dismiss
+decisions in a local SQLite journal. `modify` closes the original as
+`modified` and creates a linked pending proposal with a new action ID,
+no inherited approvals and the original expiry. `dismiss` is the
+reason-required rejection transition below (stored as `dismissed`).
+Execution still runs through the existing executor. The externally
+anchored action log (G2) and the other deployment gates remain required.
+
 ```
               ┌──────────── expired (no execution; can be re-proposed)
               │

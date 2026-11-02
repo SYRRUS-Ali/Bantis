@@ -11,10 +11,12 @@ closed catalog, the proposal and approval model, the kill switch, an
 executor that enforces the design's rules in order, and the first real
 action: the CI quarantine (`hold_promotion`) with its undo
 (`lift_promotion_hold`).
+The local manual review queue now supports **Approve / Modify / Dismiss**,
+with authenticated operator decisions and persistent execution records.
 
 **What doesn't:** the hash-chained action log (G2), the policy that
-turns incidents into proposals, the approver-authenticated `resume` and
-`approve` commands, and the other four actions. Nothing is enabled by
+turns incidents into proposals, the approver-authenticated `resume`
+command, and the other four actions. Nothing is enabled by
 default and the default mode is dry run. **Don't enable anything live
 until the gates in the design are met** — above all G1, authenticated
 ingestion in detection-engine: until then, anyone who can post an event
@@ -29,12 +31,13 @@ response-controller/
 ├── actions/base.py     # Action: the interface every action implements; ActionParams; StepGuard
 ├── registry.py         # catalog type → implementation; refuses anything outside the catalog
 ├── executor.py         # decides whether a proposal may run, and runs it; Recorder protocol
+├── approval_flow.py    # persistent SQLite review queue and serialized Approve / Modify / Dismiss decisions
 ├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
 ├── github_client.py    # repository-variables API only; https only; the token never reaches a message
 ├── wiring.py           # builds the registry, one credential per capability
 ├── kill_switch.py      # read_state (fail closed), engage (operator), trip (tripwires)
 ├── config.py           # state directory, enabled actions, dry run — from the environment
-├── cli.py              # `status`, `kill`, `promotion-hold` (read-only)
+├── cli.py              # review commands, `status`, `kill`, `promotion-hold` (read-only)
 ├── ruff.toml
 └── tests/
 ```
@@ -124,14 +127,82 @@ export RESPONSE_GITHUB_TOKEN_PROMOTION=github_pat_...   # Variables: read and wr
 python3 cli.py promotion-hold                           # read-only: is a quarantine active?
 ```
 
-If a hold must be lifted while `approve` doesn't exist yet, the operator
-can delete the variable in GitHub (Settings → Secrets and variables →
-Actions → Variables). That is the same effect as `lift_promotion_hold`,
-done by hand.
+An operator can queue a `lift_promotion_hold` proposal and approve it
+through the manual review flow below. The executor still checks the
+enabled actions, dry-run mode, kill switch and current hold first.
 
 All of it is tested against a local stand-in for GitHub's API
 (`tests/fake_github.py`), with the real HTTP client, so no test touches
 a real repository.
+
+## Manual review: Approve / Modify / Dismiss
+
+Review is a **local CLI**, as specified by the design; there is no HTTP
+approval endpoint. Proposals come from trusted policy facts or deliberate
+operator requests, never from AI output. The policy producer is not built
+yet, so `propose` accepts a proposal JSON file using the fields documented
+in the [design](../docs/response-controller-design.md#a-proposal).
+Only implemented action types and valid action parameters are accepted.
+
+The review database and lock file live at
+`$BANTIS_STATE_DIR/reviews.sqlite3` and `reviews.sqlite3.lock`. The operator
+needs write access there. These files are created with mode `0600`; keep
+the state directory within the operator's access boundary. Each decision
+is serialized through execution, and the execution marker is committed
+before an action can have an external effect. A crash after that marker
+requires investigation, rather than automatically replaying the action.
+
+Configure `RESPONSE_APPROVER_SECRET_FILE` to an operator-owned, nonempty
+secret file with mode `0600` or `0400`. Use a dedicated approval secret,
+separate from provider tokens and executor credentials. Decision commands
+prompt without echoing the secret; it is never a command-line argument or
+an audit field. The recorded identity comes from the OS user ID, rather
+than an operator-supplied name. Read commands and queuing a proposal rely
+on trusted host access; approval, modification and dismissal additionally
+require the secret.
+
+```bash
+cd response-controller
+export BANTIS_STATE_DIR=/path/to/operator-state
+export RESPONSE_APPROVER_SECRET_FILE=/path/to/private-approver-secret
+export RESPONSE_ENABLED_ACTIONS=lift_promotion_hold
+# RESPONSE_DRY_RUN defaults to true. Creating and reviewing proposals never enables live mode.
+
+python3 cli.py propose proposal.json
+python3 cli.py pending
+python3 cli.py show act_example
+python3 cli.py approve act_example 0123456789ab
+python3 cli.py modify act_example 0123456789ab --params-file params.json --reason "Correct the target"
+python3 cli.py dismiss act_example 0123456789ab --reason "False positive"
+```
+
+Replace the example ID and hash prefix with values from `show`. The
+`approve` command confirms the exact displayed proposal with at least the
+first 12 hash characters, then calls the existing executor. Required
+approvals accumulate across CLI invocations and must come from distinct
+OS identities. In dry run, the executor records the plan without acting;
+that review is closed, so a later live run needs a new proposal.
+
+`modify` accepts a JSON object replacing only the action parameters. It
+validates them against the action's schema, requires a reason, closes the
+old proposal and creates a linked replacement with a new ID and hash.
+The action type, incident, policy, approval count and expiry stay fixed.
+The replacement starts with **no approvals** and must be reviewed again;
+modification never executes an action. The currently implemented hold
+and lift actions accept only `{}`; parameterized actions can use the same
+flow when their implementations are added.
+
+`dismiss` requires a reason, records the decision and permanently closes
+the proposal without execution. Closed proposals, expired proposals and
+stale hashes cannot be approved, modified or dismissed again. `show`
+includes the persisted decision and execution history; `pending` omits
+closed and expired proposals.
+
+**The SQLite journal is not the hash-chained, externally anchored action
+log required by G2.** It supplies durable local review and replay
+protection for this flow. ADR 0006 remains Proposed and all deployment
+gates still apply. No dashboard, automated policy producer, authenticated
+resume or new action implementation is introduced here.
 
 ## The kill switch
 
@@ -160,8 +231,8 @@ python3 cli.py kill --reason "investigating" [--level auto-off] [--ai-off]
 "Engaging and resuming"). Until it exists, clearing is a deliberate
 manual step by the operator. Write the operator file with
 `{"level": "clear", "ai_off": false, "reason": "...", "set_by": "..."}`
-and delete `kill-switch.tripped`. Because no action is implemented, this
-can't cause anything to run.
+and delete `kill-switch.tripped`. Review the enabled actions and dry-run
+configuration before clearing the switch.
 
 ## Configuration
 
@@ -170,6 +241,7 @@ can't cause anything to run.
 | `BANTIS_STATE_DIR` | none — required | Holds the kill switch |
 | `RESPONSE_ENABLED_ACTIONS` | empty | Comma-separated catalog names; anything else fails at startup |
 | `RESPONSE_DRY_RUN` | `true` | Only `false` makes execution live |
+| `RESPONSE_APPROVER_SECRET_FILE` | none | Operator-owned private file; required by `approve`, `modify`, `dismiss` |
 | `RESPONSE_GITHUB_REPO` | none | `owner/name` the promotion hold applies to |
 | `RESPONSE_GITHUB_TOKEN_PROMOTION` | none | Fine-grained token: this repo, *Variables: write* only |
 | `RESPONSE_GITHUB_API_URL` | `https://api.github.com` | https only (plain http only to loopback, for tests) |
