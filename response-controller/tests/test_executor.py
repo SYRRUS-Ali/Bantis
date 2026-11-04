@@ -24,7 +24,7 @@ def test_an_enabled_auto_action_runs_and_is_verified(clear):
 
     assert outcome.status == Status.SUCCEEDED
     assert action.done_steps == [1, 2]
-    assert [e["event"] for e in recorder.entries] == ["executing", "outcome"]
+    assert [e["event"] for e in recorder.entries] == ["requested", "executing", "executed", "verification_started", "verified", "outcome"]
 
 
 # ---- refused before anything else is considered ------------------------------
@@ -244,7 +244,7 @@ def test_dry_run_records_the_plan_and_does_nothing(clear):
     assert recorder.entries[0]["proposal_hash"] == p.proposal_hash
     assert outcome.status == Status.DRY_RUN and outcome.plan == "set BANTIS_PROMOTION_HOLD"
     assert action.done_steps == []
-    assert [e["event"] for e in recorder.entries] == ["outcome"]
+    assert [e["event"] for e in recorder.entries] == ["requested", "outcome"]
 
 
 def test_dry_run_still_applies_every_check(tmp_path):

@@ -9,6 +9,7 @@ does not replace the externally anchored action log required by gate G2.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -46,6 +47,50 @@ class ReviewStore:
                 sequence INTEGER PRIMARY KEY, payload TEXT NOT NULL
             );
         """)
+
+        # Only the original schema is migrated. Missing hashes in an upgraded
+        # journal are corruption, never an invitation to silently rehash it.
+        with self.transaction():
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(events)")}
+            if "entry_hash" not in columns:
+                self.db.execute("ALTER TABLE events ADD COLUMN previous_hash TEXT")
+                self.db.execute("ALTER TABLE events ADD COLUMN entry_hash TEXT")
+                previous = "0" * 64
+                for row in self.db.execute("SELECT sequence, payload FROM events ORDER BY sequence").fetchall():
+                    digest = self._digest(row["sequence"], previous, row["payload"])
+                    self.db.execute("UPDATE events SET previous_hash = ?, entry_hash = ? WHERE sequence = ?",
+                                    (previous, digest, row["sequence"]))
+                    previous = digest
+
+    @staticmethod
+    def _digest(sequence: int, previous: str, payload: str) -> str:
+        return hashlib.sha256(f"{sequence}\n{previous}\n{payload}".encode()).hexdigest()
+
+    def verify(self, expected_head: str | None = None) -> dict:
+        previous = "0" * 64
+        count = 0
+        for row in self.db.execute("SELECT * FROM events ORDER BY sequence"):
+            count += 1
+            if (row["sequence"] != count or row["previous_hash"] != previous
+                    or row["entry_hash"] != self._digest(row["sequence"], previous, row["payload"])):
+                raise ReviewError(f"audit integrity check failed at sequence {row['sequence']}")
+            previous = row["entry_hash"]
+        if expected_head is not None and previous != expected_head:
+            raise ReviewError("audit head does not match the trusted checkpoint")
+        return {"count": count, "head": previous}
+
+    def audit(self, *, action_id: str | None = None, actor: str | None = None) -> list[dict]:
+        self.verify()
+        entries = []
+        for row in self.db.execute("SELECT * FROM events ORDER BY sequence"):
+            entry = json.loads(row["payload"])
+            if action_id is not None and entry["action_id"] != action_id:
+                continue
+            if actor is not None and actor not in {entry.get("actor"), entry.get("initiated_by")}:
+                continue
+            entries.append({**entry, "sequence": row["sequence"], "previous_hash": row["previous_hash"],
+                            "entry_hash": row["entry_hash"]})
+        return entries
 
     def close(self) -> None:
         self.db.close()
@@ -85,8 +130,7 @@ class ReviewStore:
         ]
 
     def history(self, action_id: str) -> list[dict]:
-        return [entry for row in self.db.execute("SELECT payload FROM events ORDER BY sequence")
-                if (entry := json.loads(row["payload"]))["action_id"] == action_id]
+        return self.audit(action_id=action_id)
 
     def record(self, entry: dict) -> None:
         if not self.db.in_transaction:
@@ -96,7 +140,11 @@ class ReviewStore:
             self._record(entry)
 
     def _record(self, entry: dict) -> None:
-        self.db.execute("INSERT INTO events(payload) VALUES (?)", (json.dumps(entry),))
+        head = self.verify()
+        payload = json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        sequence = head["count"] + 1
+        self.db.execute("INSERT INTO events(sequence, payload, previous_hash, entry_hash) VALUES (?, ?, ?, ?)",
+                        (sequence, payload, head["head"], self._digest(sequence, head["head"], payload)))
         if entry["event"] == "executing":
             self._status(entry["action_id"], "executing")
         elif entry["event"] == "outcome":
@@ -127,9 +175,12 @@ class ApprovalFlow:
 
     def _event(self, subject: Proposal, event: str, actor: str, now: datetime, **detail) -> None:
         self.store.record({"action_id": subject.action_id, "event": event, "actor": actor,
-                           "at": now.isoformat(), "proposal_hash": subject.proposal_hash, **detail})
+                           "at": now.astimezone(UTC).isoformat(), "proposal_hash": subject.proposal_hash,
+                           "incident_id": subject.incident_id, "type": subject.type, **detail})
 
     def submit(self, proposal: Proposal, *, actor: str = "policy", now: datetime | None = None) -> Proposal:
+        if not actor.strip():
+            raise ReviewError("proposer is required")
         self._validate(proposal)
         with self.store.locked(), self.store.transaction():
             now = now or datetime.now(UTC)
@@ -173,7 +224,7 @@ class ApprovalFlow:
                 self._event(proposal, "outcome", actor, now, **outcome.model_dump(mode="json"))
                 return outcome
             # Each executor record autocommits. Never wrap execution in a DB transaction.
-            return self.executor.run(proposal, approvals, now=now)
+            return self.executor.run(proposal, approvals, now=now, actor=actor)
 
     def modify(self, action_id: str, prefix: str, actor: str, params: dict, reason: str,
                *, now: datetime | None = None) -> Proposal:

@@ -19,6 +19,9 @@ step able to stop it:
 from __future__ import annotations
 
 import logging
+import os
+import pwd
+import uuid
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -35,8 +38,7 @@ logger = logging.getLogger("response_controller.executor")
 
 
 class Recorder(Protocol):
-    """Where every outcome goes. The hash-chained, anchored action log
-    (gate G2) implements this; until then MemoryRecorder does, for tests."""
+    """Durable audit sink; MemoryRecorder is only for tests."""
 
     def record(self, entry: dict) -> None: ...
 
@@ -71,13 +73,32 @@ class Executor:
         self._config = config
         self._recorder = recorder
 
-    def run(self, proposal: Proposal, approvals: list[Approval] | tuple[Approval, ...] = (), now: datetime | None = None) -> Outcome:
+    def run(self, proposal: Proposal, approvals: list[Approval] | tuple[Approval, ...] = (),
+            now: datetime | None = None, *, actor: str = "policy") -> Outcome:
+        if not actor.strip():
+            raise ValueError("initiating actor is required")
         now = now or datetime.now(UTC)
-        outcome = self._decide_and_run(proposal, list(approvals), now)
-        self._record(proposal, "outcome", outcome.model_dump(mode="json"), must_succeed=False)
+        attempt_id = uuid.uuid4().hex
+        executor_identity = pwd.getpwuid(os.getuid()).pw_name
+
+        def record(event: str, body: dict) -> bool:
+            return self._record(proposal, event, {
+                **body, "actor": executor_identity, "initiated_by": actor,
+                "at": datetime.now(UTC).isoformat(), "attempt_id": attempt_id,
+            })
+
+        if not record("requested", {"approvals": [a.model_dump(mode="json") for a in approvals]}):
+            return Outcome(action_id=proposal.action_id, type=proposal.type, status=Status.REFUSED,
+                           reasons=["could not record the action request; not acting"])
+        outcome = self._decide_and_run(proposal, list(approvals), now, record)
+        if not record("outcome", outcome.model_dump(mode="json")):
+            # An external effect cannot be rolled back by a failed audit write.
+            # Report uncertainty and stop subsequent execution through the tripwire.
+            return outcome.model_copy(update={"status": Status.FAILED,
+                "reasons": [*outcome.reasons, "could not record the final outcome; investigate the action log and target"]})
         return outcome
 
-    def _decide_and_run(self, proposal: Proposal, approvals: list[Approval], now: datetime) -> Outcome:
+    def _decide_and_run(self, proposal: Proposal, approvals: list[Approval], now: datetime, record) -> Outcome:
         def done(status: Status, *reasons: str, **extra) -> Outcome:
             return Outcome(action_id=proposal.action_id, type=proposal.type, status=status, reasons=list(reasons), **extra)
 
@@ -126,12 +147,12 @@ class Executor:
         if self._config.dry_run:
             return done(Status.DRY_RUN, plan=plan)
 
-        if not self._record(proposal, "executing", {"plan": plan, "approvers": sorted(approvers)}, must_succeed=True):
+        if not record("executing", {"plan": plan, "approvers": sorted(approvers)}):
             return done(Status.REFUSED, "could not record the action before executing; not acting", plan=plan)
 
-        return self._execute(proposal, action, params, plan, needs_auto=not needs_approval, done=done)
+        return self._execute(proposal, action, params, plan, needs_auto=not needs_approval, done=done, record=record)
 
-    def _execute(self, proposal, action, params: ActionParams, plan: str, needs_auto: bool, done) -> Outcome:
+    def _execute(self, proposal, action, params: ActionParams, plan: str, needs_auto: bool, done, record) -> Outcome:
         guard = _SwitchGuard(self._config, needs_auto)
         try:
             guard.check()
@@ -140,9 +161,13 @@ class Executor:
             return done(Status.INVALIDATED, f"halted by the kill switch: {exc}", plan=plan)
         except Exception as exc:
             logger.exception("action %s (%s) failed", proposal.action_id, proposal.type)
-            self._trip(f"{proposal.type} {proposal.action_id} raised {type(exc).__name__}")
+            self._trip(f"{proposal.type} {proposal.action_id} raised {type(exc).__name__}", proposal)
             return done(Status.FAILED, f"{type(exc).__name__}: {exc}", plan=plan)
 
+        if not record("executed", {"detail": result.detail}):
+            return done(Status.FAILED, "could not record the execution result; investigate target state", plan=plan)
+        if not record("verification_started", {}):
+            return done(Status.FAILED, "could not record verification; investigate target state", plan=plan)
         try:
             verified = action.verify(proposal, params, result)
         except Exception as exc:
@@ -151,17 +176,21 @@ class Executor:
             reason = f"post-check raised {type(exc).__name__}: {exc}"
         else:
             reason = "post-check: the intended effect is not in place"
+        if not record("verified", {"verified": verified, "reason": None if verified else reason}):
+            return done(Status.FAILED, "could not record verification result; investigate target state", plan=plan)
         if not verified:
-            self._trip(f"{proposal.type} {proposal.action_id}: {reason}")
+            self._trip(f"{proposal.type} {proposal.action_id}: {reason}", proposal)
             return done(Status.FAILED, reason, plan=plan, detail=result.detail)
         return done(Status.SUCCEEDED, plan=plan, detail=result.detail)
 
-    def _record(self, proposal: Proposal, event: str, body: dict, must_succeed: bool) -> bool:
+    def _record(self, proposal: Proposal, event: str, body: dict) -> bool:
         entry = {
             "action_id": proposal.action_id,
             "event": event,
             "proposal": proposal.model_dump(mode="json"),
             "proposal_hash": proposal.proposal_hash,
+            "incident_id": proposal.incident_id,
+            "type": proposal.type,
             **body,
         }
         try:
@@ -169,12 +198,22 @@ class Executor:
             return True
         except Exception:
             logger.exception("could not record %s for %s", event, proposal.action_id)
-            self._trip(f"the action log could not be written ({event} {proposal.action_id})")
+            self._trip(f"the action log could not be written ({event} {proposal.action_id})", proposal)
             return False
 
-    def _trip(self, reason: str) -> None:
+    def _trip(self, reason: str, proposal: Proposal) -> None:
         try:
             trip(self._config.state_dir, Level.EXECUTION_OFF, reason)
+            try:
+                self._recorder.record({
+                    "action_id": proposal.action_id, "incident_id": proposal.incident_id,
+                    "type": proposal.type, "proposal_hash": proposal.proposal_hash,
+                    "event": "kill_switch_tripped", "actor": pwd.getpwuid(os.getuid()).pw_name,
+                    "at": datetime.now(UTC).isoformat(), "level": Level.EXECUTION_OFF.value,
+                    "reason": reason,
+                })
+            except Exception:
+                logger.error("kill switch engaged; could not audit tripwire: %s", reason)
         except Exception:
             # The switch can't be written either. read_state() fails closed on
             # an unreadable tripwire file, but not on one that was never written,

@@ -41,7 +41,13 @@ def test_submission_waits_then_approval_executes_exactly_once(review):
     assert outcome.status == Status.SUCCEEDED
     assert action.done_steps == [1, 2]
     assert flow.store.get(p.action_id)[1] == "succeeded"
-    assert [e["event"] for e in flow.store.history(p.action_id)] == ["proposed", "approved", "executing", "outcome"]
+    assert [e["event"] for e in flow.store.history(p.action_id)] == ["proposed", "approved", "requested", "executing", "executed", "verification_started", "verified", "outcome"]
+    history = flow.store.history(p.action_id)
+    request = next(e for e in history if e["event"] == "requested")
+    assert request["initiated_by"] == "alice"
+    assert request["approvals"][0]["approver"] == "alice"
+    assert history[-1]["initiated_by"] == "alice"
+    assert flow.store.verify()["head"] == history[-1]["entry_hash"]
     with pytest.raises(ReviewError, match="closed"):
         flow.approve(p.action_id, p.proposal_hash[:12], "alice", now=NOW)
     assert action.done_steps == [1, 2]
