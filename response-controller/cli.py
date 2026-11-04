@@ -9,7 +9,9 @@ import pwd
 import sqlite3
 import stat
 import sys
+import uuid
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 from config import ConfigError, from_env
@@ -38,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--reason", required=True)
         if decision == "modify":
             command.add_argument("--params-file", type=Path, required=True, help="JSON object replacing the action parameters.")
+    audit = commands.add_parser("audit", help="Export the verified audit trail as JSON lines.")
+    audit.add_argument("--action-id")
+    audit.add_argument("--actor", help="Filter by executor, initiating operator or reviewer.")
+    verify = commands.add_parser("audit-verify", help="Verify journal integrity and print its checkpoint.")
+    verify.add_argument("--expected-head", help="Compare with a previously trusted checkpoint hash.")
     args = parser.parse_args(argv)
 
     if args.command == "promotion-hold":
@@ -49,11 +56,23 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss"}:
+    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify"}:
         return _review(args, config)
 
     if args.command == "kill":
-        engage(config.state_dir, Level(args.level), args.reason, getpass.getuser(), ai_off=args.ai_off)
+        actor = pwd.getpwuid(os.getuid()).pw_name
+        engage(config.state_dir, Level(args.level), args.reason, actor, ai_off=args.ai_off)
+        # Emergency stopping must work even when the journal is unavailable.
+        try:
+            from approval_flow import ReviewStore
+
+            with closing(ReviewStore(config.state_dir / "reviews.sqlite3")) as store:
+                store.record({"action_id": f"kill_{uuid.uuid4().hex}", "event": "kill_switch_engaged",
+                              "actor": actor, "at": datetime.now(UTC).isoformat(),
+                              "level": args.level, "ai_off": args.ai_off, "reason": args.reason})
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            print(f"Kill switch engaged; could not audit engagement: {exc}", file=sys.stderr)
+            return 1
 
     state = read_state(config.state_dir)
     print(f"level: {state.level.value}")
@@ -94,7 +113,12 @@ def _review(args, config) -> int:
         registry = build_registry()
         with closing(ReviewStore(config.state_dir / "reviews.sqlite3")) as store:
             flow = ApprovalFlow(store, Executor(registry, config, store), registry)
-            if args.command == "propose":
+            if args.command == "audit":
+                for entry in store.audit(action_id=args.action_id, actor=args.actor):
+                    print(json.dumps(entry, sort_keys=True))
+            elif args.command == "audit-verify":
+                print(json.dumps(store.verify(args.expected_head), sort_keys=True))
+            elif args.command == "propose":
                 proposal = flow.submit(Proposal.model_validate_json(args.file.read_text()),
                                        actor=pwd.getpwuid(os.getuid()).pw_name)
                 _print_proposal(proposal, "pending")
