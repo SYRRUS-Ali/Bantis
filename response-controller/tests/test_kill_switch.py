@@ -94,3 +94,32 @@ def test_ai_off_is_independent_of_the_execution_level(tmp_path):
     engage(tmp_path, Level.CLEAR, "setup", "test", ai_off=True)
     state = read_state(tmp_path)
     assert state.execution_allowed and state.ai_off
+
+@pytest.mark.parametrize("writer", ["operator", "tripwire"])
+def test_concurrent_writers_preserve_the_strongest_stop(tmp_path, writer):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    engage(tmp_path, Level.CLEAR, "setup", "test")
+    count = 24
+    ready = Barrier(count)
+
+    def stop(index):
+        ready.wait(timeout=10)
+        level = Level.EXECUTION_OFF if index == 0 else Level.AUTO_OFF
+        if writer == "operator":
+            engage(tmp_path, level, "concurrent stop", "op", ai_off=index == 0)
+        else:
+            trip(tmp_path, level, "concurrent stop", ai_off=index == 0)
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        list(pool.map(stop, range(count)))
+    state = read_state(tmp_path)
+    assert state.level == Level.EXECUTION_OFF and state.ai_off
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_milder_stop_cannot_relax_a_corrupt_operator_switch(tmp_path):
+    (tmp_path / OPERATOR_FILE).write_text("broken")
+    engage(tmp_path, Level.AUTO_OFF, "stop", "op")
+    assert _halted(read_state(tmp_path))

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -88,31 +90,48 @@ def _write(path: Path, level: Level, ai_off: bool, reason: str, set_by: str) -> 
     os.replace(tmp, path)  # atomic: a reader sees the old state or the new one, never half a file
 
 
+@contextmanager
+def _locked(state_dir: str | os.PathLike):
+    """Serialize writers using the existing directory, without blocking readers."""
+    fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def engage(state_dir: str | os.PathLike, level: Level, reason: str, set_by: str, ai_off: bool = False) -> None:
     """The operator's stop. Never lowers the current operator level."""
     if not reason.strip():
         raise ValueError("a reason is required")
-    path = Path(state_dir) / OPERATOR_FILE
-    try:
-        current_level, current_ai_off, _ = _parse(path)
-    except Exception:
-        current_level, current_ai_off = Level.CLEAR, False
-    if _RANK[current_level] > _RANK[level]:
-        level = current_level
-    _write(path, level, ai_off or current_ai_off, reason, set_by)
+    with _locked(state_dir):
+        path = Path(state_dir) / OPERATOR_FILE
+        try:
+            current_level, current_ai_off, _ = _parse(path)
+        except FileNotFoundError:
+            current_level, current_ai_off = Level.CLEAR, False
+        except Exception:
+            current_level, current_ai_off = (
+                (Level.CLEAR, False) if level == Level.CLEAR else (Level.EXECUTION_OFF, True)
+            )
+        if _RANK[current_level] > _RANK[level]:
+            level = current_level
+        _write(path, level, ai_off or current_ai_off, reason, set_by)
 
 
 def trip(state_dir: str | os.PathLike, level: Level, reason: str, ai_off: bool = False) -> None:
     """A tripwire. Can only add restriction to what's already tripped."""
     if level == Level.CLEAR:
         raise ValueError("a tripwire can engage the switch, never clear it")
-    path = Path(state_dir) / TRIPWIRE_FILE
-    try:
-        current_level, current_ai_off, _ = _parse(path)
-    except FileNotFoundError:
-        current_level, current_ai_off = Level.CLEAR, False
-    except Exception:
-        current_level, current_ai_off = Level.EXECUTION_OFF, True
-    if _RANK[current_level] > _RANK[level]:
-        level = current_level
-    _write(path, level, ai_off or current_ai_off, reason, "tripwire")
+    with _locked(state_dir):
+        path = Path(state_dir) / TRIPWIRE_FILE
+        try:
+            current_level, current_ai_off, _ = _parse(path)
+        except FileNotFoundError:
+            current_level, current_ai_off = Level.CLEAR, False
+        except Exception:
+            current_level, current_ai_off = Level.EXECUTION_OFF, True
+        if _RANK[current_level] > _RANK[level]:
+            level = current_level
+        _write(path, level, ai_off or current_ai_off, reason, "tripwire")
