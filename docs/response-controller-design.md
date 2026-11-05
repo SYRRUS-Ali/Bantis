@@ -191,8 +191,13 @@ decisions in a local SQLite journal. `modify` closes the original as
 `modified` and creates a linked pending proposal with a new action ID,
 no inherited approvals and the original expiry. `dismiss` is the
 reason-required rejection transition below (stored as `dismissed`).
-Execution still runs through the existing executor. The externally
-anchored action log (G2) and the other deployment gates remain required.
+Execution still runs through the existing executor. The journal now chains
+review and execution events with SHA-256, records executor and initiator
+identities and per-event UTC times, and supports verified JSON-lines export
+and checkpoint comparison through `audit` and `audit-verify`. Existing journal
+payloads receive a migration baseline without invented historical metadata.
+External anchoring (G2) and the other deployment gates remain required; see
+[the audit trail documentation](../response-controller/README.md#audit-trail).
 
 ```
               ┌──────────── expired (no execution; can be re-proposed)

@@ -12,9 +12,9 @@ executor that enforces the design's rules in order, and the first real
 action: the CI quarantine (`hold_promotion`) with its undo
 (`lift_promotion_hold`).
 The local manual review queue now supports **Approve / Modify / Dismiss**,
-with authenticated operator decisions and persistent execution records.
+with authenticated operator decisions and a persistent, hash-chained audit trail.
 
-**What doesn't:** the hash-chained action log (G2), the policy that
+**What doesn't:** external anchoring of the action log (G2), the policy that
 turns incidents into proposals, the approver-authenticated `resume`
 command, and the other four actions. Nothing is enabled by
 default and the default mode is dry run. **Don't enable anything live
@@ -198,11 +198,78 @@ stale hashes cannot be approved, modified or dismissed again. `show`
 includes the persisted decision and execution history; `pending` omits
 closed and expired proposals.
 
-**The SQLite journal is not the hash-chained, externally anchored action
-log required by G2.** It supplies durable local review and replay
-protection for this flow. ADR 0006 remains Proposed and all deployment
-gates still apply. No dashboard, automated policy producer, authenticated
+**The SQLite journal is hash-chained, but external anchoring required by
+G2 remains an operator deployment responsibility.** It supplies durable
+local review and replay protection. ADR 0006 remains Proposed and all
+deployment gates still apply. No dashboard, automated policy producer, authenticated
 resume or new action implementation is introduced here.
+
+## Audit trail
+
+Every executor attempt records `requested` and a final `outcome`, including
+refused, expired, invalidated, awaiting-approval and dry-run attempts. A live
+execution additionally records `executing` before external effects,
+`executed` with the action's structured result, `verification_started`, and
+`verified` with the post-check result or error. If execution raises or the
+switch interrupts it, the final outcome records the failure or halt;
+verification events only exist if verification was reached. A crash can leave
+an incomplete attempt, which must be investigated rather than replayed.
+
+Executor events carry the OS executor identity (`actor`), the initiating
+operator or policy (`initiated_by`), a unique `attempt_id`, a UTC `at`
+timestamp captured at each event, the action and incident IDs, action type,
+proposal and proposal hash. The request also preserves the presented
+approvals. Review events retain their operator, timestamp and reason, and
+modifications link both proposal IDs. Lifting a promotion hold uses the same
+trail as any other action. Action results are structured summaries; approval
+secrets, executor credentials and raw HTTP headers are never added as audit
+fields.
+
+Manual CLI kill-switch engagements and executor tripwires are also recorded
+with identity, timestamp, restriction and reason. Emergency stopping happens
+first and remains available when the journal is broken; the CLI returns a
+nonzero status and explains when the stop succeeded but auditing failed.
+
+Each journal row has an ordered sequence, previous hash and SHA-256 hash
+covering the sequence, previous hash and exact stored payload. Appends verify
+the existing chain inside a SQLite write transaction. Corruption prevents
+further appends and execution. A failed pre-execution audit write prevents
+the external effect and trips the switch. An audit failure after an effect
+returns `failed` with an investigation reason and trips the switch; the
+external effect may already have happened and is never reported as an
+unaudited success.
+
+```bash
+cd response-controller
+# Uses BANTIS_STATE_DIR, as do the review commands.
+python3 cli.py audit                          # Ordered JSON lines, including hashes
+python3 cli.py audit --action-id act_example
+python3 cli.py audit --actor operator         # Reviewer, initiator or executor
+python3 cli.py audit-verify                   # Prints count and current head hash
+python3 cli.py audit-verify --expected-head <trusted-head-hash>
+```
+
+`show` also includes verified history for its proposal. Audit commands need
+trusted host access but do not prompt for an approval secret. Verification
+errors return exit code 2, and export verifies before emitting any records.
+Exported lines may contain sensitive incident and proposal details; keep them
+within the same access boundary as the private review database.
+
+**Checkpoint handling:** retain the `audit-verify` head hash in an
+operator-controlled location outside the controller's write access. Compare
+it with `--expected-head` while the journal is unchanged. This comparison
+catches tail truncation; ordinary chain verification detects edits and gaps
+but cannot detect a complete rewrite or deletion of a valid suffix by someone
+who can rewrite the database. A prior head will also differ after legitimate
+new appends, so checkpoint comparisons require a known journal boundary.
+Automatic publication to an external checkpoint store is not implemented.
+
+Existing review databases are upgraded transactionally on first open. Their
+original payloads are preserved and given an initial chain baseline; missing
+historical actors or timestamps are not invented. This baseline does not
+prove the authenticity of records written before the upgrade. Back up the
+journal before upgrading. Once upgraded, missing or invalid row hashes are
+reported as corruption and are never silently rebuilt.
 
 ## The kill switch
 
