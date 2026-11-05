@@ -1,3 +1,5 @@
+import pytest
+
 from cli import main
 from kill_switch import Level, read_state
 
@@ -154,3 +156,57 @@ def test_cli_approval_can_lift_hold_using_only_fake_github(tmp_path, monkeypatch
         assert len(github.writes()) == 1
     finally:
         github.close()
+
+
+@pytest.mark.parametrize("command", ["kill", "emergency-stop"])
+def test_stopping_ignores_invalid_execution_configuration(tmp_path, monkeypatch, capsys, command):
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("RESPONSE_ENABLED_ACTIONS", "unknown-action")
+    monkeypatch.setenv("RESPONSE_DRY_RUN", "invalid")
+    monkeypatch.setattr("cli.getpass.getpass", lambda _: pytest.fail("Stopping must not prompt"))
+    assert main([command, "--reason", "Stop now"]) == 0
+    assert not read_state(tmp_path).execution_allowed
+    assert "Kill switch engaged" in capsys.readouterr().out
+
+
+def test_emergency_stop_needs_no_arguments_and_stops_ai(tmp_path, monkeypatch):
+    from helpers import clear_switch
+
+    clear_switch(tmp_path)
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    assert main(["emergency-stop"]) == 0
+    state = read_state(tmp_path)
+    assert not state.execution_allowed and not state.auto_allowed and state.ai_off
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_stop_rejects_blank_reason_without_traceback(tmp_path, monkeypatch, capsys, reason):
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    assert main(["emergency-stop", "--reason", reason]) == 2
+    assert "a reason is required" in capsys.readouterr().err
+
+
+def test_stop_reports_an_unwritable_state_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path / "missing"))
+    assert main(["emergency-stop"]) == 2
+    assert "Could not engage kill switch" in capsys.readouterr().err
+
+
+def test_emergency_stop_survives_a_broken_audit_journal(tmp_path, monkeypatch, capsys):
+    (tmp_path / "reviews.sqlite3").write_text("broken database")
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    assert main(["emergency-stop"]) == 1
+    assert not read_state(tmp_path).execution_allowed and read_state(tmp_path).ai_off
+    captured = capsys.readouterr()
+    assert "Kill switch engaged" in captured.out
+    assert "could not audit engagement" in captured.err
+
+
+
+def test_emergency_button_uses_the_same_persistent_stop(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("RESPONSE_DRY_RUN", "invalid")
+    monkeypatch.setattr("emergency_button.show_button", lambda stop: stop())
+    assert main(["emergency-button"]) == 0
+    state = read_state(tmp_path)
+    assert not state.execution_allowed and state.ai_off

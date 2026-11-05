@@ -26,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     kill.add_argument("--level", choices=[Level.AUTO_OFF.value, Level.EXECUTION_OFF.value], default=Level.EXECUTION_OFF.value)
     kill.add_argument("--ai-off", action="store_true", help="Also stop the AI Copilot's model calls.")
     kill.add_argument("--reason", required=True)
+    emergency = commands.add_parser("emergency-stop", help="Immediately stop all execution and AI calls. No approval needed.")
+    emergency.add_argument("--reason", default="Emergency stop requested by operator")
+    emergency.set_defaults(level=Level.EXECUTION_OFF.value, ai_off=True)
+    commands.add_parser("emergency-button", help="Open a local emergency stop button (requires Tk).")
     commands.add_parser("promotion-hold", help="Show whether a CI promotion hold (quarantine) is active. Read-only.")
     propose = commands.add_parser("propose", help="Queue a policy proposal from a JSON file; never executes it.")
     propose.add_argument("file", type=Path)
@@ -49,9 +53,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "promotion-hold":
         return _show_promotion_hold()
+    if args.command == "emergency-button":
+        from emergency_button import show_button
+
+        return show_button(lambda: main(["emergency-stop"]))
 
     try:
-        config = from_env()
+        # A broken action configuration must never prevent an emergency stop.
+        if args.command in {"kill", "emergency-stop"}:
+            config = from_env({"BANTIS_STATE_DIR": os.environ.get("BANTIS_STATE_DIR", "")})
+        else:
+            config = from_env()
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -59,9 +71,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify"}:
         return _review(args, config)
 
-    if args.command == "kill":
+    if args.command in {"kill", "emergency-stop"}:
         actor = pwd.getpwuid(os.getuid()).pw_name
-        engage(config.state_dir, Level(args.level), args.reason, actor, ai_off=args.ai_off)
+        try:
+            engage(config.state_dir, Level(args.level), args.reason, actor, ai_off=args.ai_off)
+        except (ValueError, OSError) as exc:
+            print(f"Could not engage kill switch: {exc}", file=sys.stderr)
+            return 2
+        state = read_state(config.state_dir)
+        print(f"Kill switch engaged: {state.level.value}; AI {'off' if state.ai_off else 'on'}", flush=True)
         # Emergency stopping must work even when the journal is unavailable.
         try:
             from approval_flow import ReviewStore
@@ -69,10 +87,11 @@ def main(argv: list[str] | None = None) -> int:
             with closing(ReviewStore(config.state_dir / "reviews.sqlite3")) as store:
                 store.record({"action_id": f"kill_{uuid.uuid4().hex}", "event": "kill_switch_engaged",
                               "actor": actor, "at": datetime.now(UTC).isoformat(),
-                              "level": args.level, "ai_off": args.ai_off, "reason": args.reason})
+                              "level": state.level.value, "ai_off": state.ai_off, "reason": args.reason})
         except (ValueError, OSError, sqlite3.Error) as exc:
             print(f"Kill switch engaged; could not audit engagement: {exc}", file=sys.stderr)
             return 1
+        return 0
 
     state = read_state(config.state_dir)
     print(f"level: {state.level.value}")

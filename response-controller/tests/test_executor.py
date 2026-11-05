@@ -280,3 +280,21 @@ def test_an_error_while_checking_invalidates_without_acting_or_tripping(clear, m
     assert outcome.status == Status.INVALIDATED and "GitHub unreachable" in outcome.reasons[0]
     assert action.done_steps == []
     assert read_state(clear).level == Level.CLEAR
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_emergency_stop_interrupts_execution_and_blocks_the_next_action(clear, monkeypatch, approved):
+    from cli import main
+
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(clear))
+    action = FakeAction(steps=3)
+    action.on_step = lambda n: main(["emergency-stop"]) if n == 1 else None
+    executor, recorder = make(clear, [action])
+    p = proposal()
+    outcome = executor.run(p, [approve(p)] if approved else [], now=NOW)
+    assert outcome.status == Status.INVALIDATED
+    assert action.done_steps == [1]
+    assert read_state(clear).ai_off
+    assert recorder.entries[-1]["status"] == Status.INVALIDATED
+    next_proposal = proposal()
+    assert executor.run(next_proposal, [approve(next_proposal)], now=NOW).status == Status.INVALIDATED
+    assert action.done_steps == [1]

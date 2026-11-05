@@ -35,6 +35,7 @@ response-controller/
 ├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
 ├── github_client.py    # repository-variables API only; https only; the token never reaches a message
 ├── wiring.py           # builds the registry, one credential per capability
+├── emergency_button.py # local Tk emergency stop button; shares the CLI stop path
 ├── kill_switch.py      # read_state (fail closed), engage (operator), trip (tripwires)
 ├── config.py           # state directory, enabled actions, dry run — from the environment
 ├── cli.py              # review commands, `status`, `kill`, `promotion-hold` (read-only)
@@ -272,6 +273,53 @@ journal before upgrading. Once upgraded, missing or invalid row hashes are
 reported as corruption and are never silently rebuilt.
 
 ## The kill switch
+
+### Emergency stop
+
+Set `BANTIS_STATE_DIR` to the same existing state directory used by the
+controller and Copilot, then open the local operator button:
+
+```bash
+cd response-controller
+export BANTIS_STATE_DIR=/path/to/operator-state
+python3 cli.py emergency-button
+```
+
+Click **EMERGENCY STOP** once. There is no approval or confirmation prompt.
+The button engages `execution-off` and `ai-off`, blocking approved actions
+as well as automatic actions and new AI model calls. The window requires
+Python's Tk support and a graphical display. On a server or without Tk,
+use the equivalent command:
+
+```bash
+python3 cli.py emergency-stop
+python3 cli.py status
+```
+
+An optional `--reason "Incident investigation"` replaces the default
+operator emergency reason. `kill` remains available for a narrower stop.
+Both stop commands work even if `RESPONSE_ENABLED_ACTIONS` or
+`RESPONSE_DRY_RUN` is invalid. They require local write access to the state
+directory; no network connection or approval secret is needed.
+
+The stop is persisted **before** attempting audit logging. The command
+prints confirmation immediately after persisting it. Exit code `0` means
+stopped and audited, `1` means stopped but audit logging failed, and `2`
+means the stop could not be written or its configuration was invalid.
+The button displays these outcomes and permits retrying a failed stop.
+
+The executor re-reads the switch before execution and between action
+steps. An external request already in flight can finish; stopping cannot
+undo an effect already sent. No subsequent guarded step starts after the
+stop is observed. New AI model calls are disabled; in-flight calls are not
+cancelled. Monitoring and incident ingestion continue.
+
+Concurrent operator and tripwire writers serialize their read/merge/write
+operations using a local directory lock, preserving the strongest level
+and any existing AI stop. Readers remain independent of this lock. Use a
+local filesystem with advisory locking support. A malformed operator
+switch remains fully stopped when an operator requests a milder stop.
+
 
 | File (in `$BANTIS_STATE_DIR`) | Written by | Can |
 |---|---|---|
