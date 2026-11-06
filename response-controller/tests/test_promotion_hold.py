@@ -44,6 +44,7 @@ def _lift():
 
 
 def _executor(state_dir, client, **kw):
+    kw.setdefault("automatic_policy_rule", "A3:composite-success")
     return make(state_dir, [HoldPromotion(client), LiftPromotionHold(client)], **kw)
 
 
@@ -59,7 +60,7 @@ def test_quarantine_sets_the_hold_and_verifies_it(clear, github, client):
     assert outcome.status == Status.SUCCEEDED, outcome.reasons
     assert github.variables == {HOLD_VARIABLE: hold_value(p)}
     assert github.variables[HOLD_VARIABLE] == f"{HOLD_MARKER} incident=inc-1 action={p.action_id}"
-    assert [e["event"] for e in recorder.entries] == ["requested", "executing", "executed", "verification_started", "verified", "outcome"]
+    assert [e["event"] for e in recorder.entries] == ["requested", "automatic_reserved", "executing", "executed", "verification_started", "verified", "outcome"]
 
 
 def test_quarantine_runs_without_approval_but_lifting_it_needs_one(clear, github, client):
@@ -228,7 +229,8 @@ def test_without_credentials_the_action_says_so_instead_of_acting(clear):
 
     config = ControllerConfig(state_dir=clear, enabled_actions=frozenset({"hold_promotion"}), dry_run=False)
     executor = Executor(build_registry({}), config, MemoryRecorder())
-    outcome = executor.run(_hold(), now=NOW)
+    p = _hold()
+    outcome = executor.run(p, [approve(p)], now=NOW)
     assert outcome.status == Status.INVALIDATED and "not configured" in outcome.reasons[0]
 
 

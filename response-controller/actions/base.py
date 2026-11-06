@@ -37,6 +37,11 @@ class Action(ABC):
     type: ClassVar[str]
     params_model: ClassVar[type[ActionParams]] = NoParams
 
+    @property
+    def automatic_scope(self) -> str | None:
+        """Fixed deployment target, if this implementation supports automation."""
+        return None
+
     def parse_params(self, proposal: Proposal) -> ActionParams:
         return self.params_model.model_validate(proposal.params)
 

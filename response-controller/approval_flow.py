@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from automatic import check_reservation
 from executor import Executor
 from models import HASH_PREFIX_LENGTH, Approval, Outcome, Proposal, Status
 from registry import ActionRegistry
@@ -155,6 +156,12 @@ class ReviewStore:
     def already_executed(self, action_id: str) -> bool:
         return any(e["event"] in {"executing", "dismissed", "modified"} for e in self.history(action_id))
 
+    def reserve_automatic(self, entry: dict, maximum: int) -> None:
+        # Count and reserve in one write transaction across processes and restarts.
+        with self.transaction():
+            check_reservation(self.audit(), entry, maximum)
+            self.record(entry)
+
     def _insert(self, proposal: Proposal) -> None:
         self.db.execute("INSERT INTO proposals(action_id, payload) VALUES (?, ?)",
                         (proposal.action_id, proposal.model_dump_json()))
@@ -172,6 +179,16 @@ class ApprovalFlow:
         if action is None:
             raise ReviewError(f"{proposal.type!r} has no implementation")
         action.parse_params(proposal)
+
+    def run_automatic(self, action_id: str, *, now: datetime | None = None) -> Outcome:
+        """Run one pending proposal without supplying or reusing manual approvals."""
+        with self.store.locked():
+            now = now or datetime.now(UTC)
+            proposal, _ = self.store.get(action_id)
+            proposal = self._pending(action_id, proposal.proposal_hash, now)
+            if self.store.db.execute("SELECT 1 FROM approvals WHERE action_id = ?", (action_id,)).fetchone():
+                raise ReviewError("proposal has manual approvals; continue through the manual review flow")
+            return self.executor.run(proposal, now=now, actor="automatic-policy")
 
     def _event(self, subject: Proposal, event: str, actor: str, now: datetime, **detail) -> None:
         self.store.record({"action_id": subject.action_id, "event": event, "actor": actor,

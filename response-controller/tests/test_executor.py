@@ -24,7 +24,7 @@ def test_an_enabled_auto_action_runs_and_is_verified(clear):
 
     assert outcome.status == Status.SUCCEEDED
     assert action.done_steps == [1, 2]
-    assert [e["event"] for e in recorder.entries] == ["requested", "executing", "executed", "verification_started", "verified", "outcome"]
+    assert [e["event"] for e in recorder.entries] == ["requested", "automatic_reserved", "executing", "executed", "verification_started", "verified", "outcome"]
 
 
 # ---- refused before anything else is considered ------------------------------

@@ -8,10 +8,10 @@ step able to stop it:
 5. it hasn't expired
 6. approvals presented match this exact proposal's hash
 7. the kill switch allows it (fail closed)
-8. enough distinct approvers, if the tier -- or auto-off -- requires them
+8. enough distinct approvers, unless the proposal matches the explicit automatic scope
 9. the action's preconditions hold
 10. dry run stops here, recording the plan
-11. "executing" is recorded first: if it can't be recorded, it doesn't run
+11. reserve an automatic slot if needed, then record "executing" before any effect
 12. execute, with the kill switch re-checked before every step
 13. verify the effect; a failure trips the kill switch
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import pwd
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import Protocol
@@ -28,6 +29,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from actions.base import ActionParams, Halted, StepGuard
+from automatic import AutomaticDuplicate, AutomaticLimit, check_reservation
 from catalog import CATALOG, Tier
 from config import ControllerConfig
 from kill_switch import Level, read_state, trip
@@ -44,16 +46,24 @@ class Recorder(Protocol):
 
     def already_executed(self, action_id: str) -> bool: ...
 
+    def reserve_automatic(self, entry: dict, maximum: int) -> None: ...
+
 
 class MemoryRecorder:
     def __init__(self) -> None:
         self.entries: list[dict] = []
+        self._automatic_lock = threading.Lock()
 
     def record(self, entry: dict) -> None:
         self.entries.append(entry)
 
     def already_executed(self, action_id: str) -> bool:
         return any(e["action_id"] == action_id and e["event"] == "executing" for e in self.entries)
+
+    def reserve_automatic(self, entry: dict, maximum: int) -> None:
+        with self._automatic_lock:
+            check_reservation(self.entries, entry, maximum)
+            self.record(entry)
 
 
 class _SwitchGuard(StepGuard):
@@ -130,9 +140,16 @@ class Executor:
         state = read_state(self._config.state_dir)
         if not state.execution_allowed:
             return done(Status.INVALIDATED, *state.reasons)
-        needs_approval = tier == Tier.APPROVAL or not state.auto_allowed
+        auto_eligible = (
+            tier == Tier.AUTO
+            and proposal.type == self._config.automatic_action
+            and action.automatic_scope == self._config.automatic_repo
+            and proposal.policy_rule == self._config.automatic_policy_rule
+            and proposal.required_approvals == 1
+        )
+        needs_approval = bool(approvals) or not auto_eligible or not state.auto_allowed
         if needs_approval and len(approvers) < proposal.required_approvals:
-            why = "approval required" if tier == Tier.APPROVAL else "auto-execution is off; approval required"
+            why = "approval required" if state.auto_allowed else "auto-execution is off; approval required"
             return done(Status.AWAITING_APPROVAL, f"{why}: {len(approvers)} of {proposal.required_approvals}")
 
         try:
@@ -146,6 +163,20 @@ class Executor:
 
         if self._config.dry_run:
             return done(Status.DRY_RUN, plan=plan)
+
+        if not needs_approval:
+            try:
+                reserved = record("automatic_reserved", {"reserved_at": now.isoformat(),
+                                  "scope": action.automatic_scope,
+                                  "policy_rule": self._config.automatic_policy_rule,
+                                  "maximum_per_hour": self._config.automatic_max_per_hour})
+            except AutomaticDuplicate as exc:
+                return done(Status.INVALIDATED, str(exc), plan=plan)
+            except AutomaticLimit as exc:
+                self._trip(str(exc), proposal, level=Level.AUTO_OFF)
+                return done(Status.AWAITING_APPROVAL, str(exc), plan=plan)
+            if not reserved:
+                return done(Status.REFUSED, "could not reserve an automatic attempt; not acting", plan=plan)
 
         if not record("executing", {"plan": plan, "approvers": sorted(approvers)}):
             return done(Status.REFUSED, "could not record the action before executing; not acting", plan=plan)
@@ -194,22 +225,27 @@ class Executor:
             **body,
         }
         try:
-            self._recorder.record(entry)
+            if event == "automatic_reserved":
+                self._recorder.reserve_automatic(entry, self._config.automatic_max_per_hour)
+            else:
+                self._recorder.record(entry)
             return True
+        except (AutomaticLimit, AutomaticDuplicate):
+            raise
         except Exception:
             logger.exception("could not record %s for %s", event, proposal.action_id)
             self._trip(f"the action log could not be written ({event} {proposal.action_id})", proposal)
             return False
 
-    def _trip(self, reason: str, proposal: Proposal) -> None:
+    def _trip(self, reason: str, proposal: Proposal, *, level: Level = Level.EXECUTION_OFF) -> None:
         try:
-            trip(self._config.state_dir, Level.EXECUTION_OFF, reason)
+            trip(self._config.state_dir, level, reason)
             try:
                 self._recorder.record({
                     "action_id": proposal.action_id, "incident_id": proposal.incident_id,
                     "type": proposal.type, "proposal_hash": proposal.proposal_hash,
                     "event": "kill_switch_tripped", "actor": pwd.getpwuid(os.getuid()).pw_name,
-                    "at": datetime.now(UTC).isoformat(), "level": Level.EXECUTION_OFF.value,
+                    "at": datetime.now(UTC).isoformat(), "level": level.value,
                     "reason": reason,
                 })
             except Exception:

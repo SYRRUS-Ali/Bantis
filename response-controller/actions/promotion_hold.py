@@ -28,6 +28,10 @@ class HoldPromotion(Action):
     def __init__(self, client: GitHubVariables | None) -> None:
         self._client = client
 
+    @property
+    def automatic_scope(self) -> str | None:
+        return self._client.repo if self._client is not None else None
+
     def preconditions(self, proposal, params):
         problems = _unconfigured(self._client)
         for label, value in (("incident_id", proposal.incident_id), ("action_id", proposal.action_id)):
