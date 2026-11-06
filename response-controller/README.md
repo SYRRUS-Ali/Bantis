@@ -13,6 +13,8 @@ action: the CI quarantine (`hold_promotion`) with its undo
 (`lift_promotion_hold`).
 The local manual review queue now supports **Approve / Modify / Dismiss**,
 with authenticated operator decisions and a persistent, hash-chained audit trail.
+An opt-in automatic runner supports only `hold_promotion`, pinned to one
+repository and policy rule, with durable attempt limits.
 
 **What doesn't:** external anchoring of the action log (G2), the policy that
 turns incidents into proposals, the approver-authenticated `resume`
@@ -31,6 +33,7 @@ response-controller/
 ├── actions/base.py     # Action: the interface every action implements; ActionParams; StepGuard
 ├── registry.py         # catalog type → implementation; refuses anything outside the catalog
 ├── executor.py         # decides whether a proposal may run, and runs it; Recorder protocol
+├── automatic.py        # automatic reservation checks: one attempt per incident, rolling hourly cap
 ├── approval_flow.py    # persistent SQLite review queue and serialized Approve / Modify / Dismiss decisions
 ├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
 ├── github_client.py    # repository-variables API only; https only; the token never reaches a message
@@ -51,6 +54,7 @@ Every action is a subclass of `actions.base.Action`:
 |---|---|
 | `type` | A catalog name. The registry refuses anything else. |
 | `params_model` | A subclass of `ActionParams`: unknown keys rejected, no type coercion, immutable. |
+| `automatic_scope` | The implementation's fixed target; defaults to no automatic support. |
 | `preconditions(proposal, params)` | Read-only. Why it can't run now; empty when it can. |
 | `plan(proposal, params)` | Read-only. One line saying what `execute` would do — the dry-run record and what an approver reads. |
 | `execute(proposal, params, guard)` | Does it. Idempotent per `action_id`. Calls `guard.check()` before every step with an external effect. |
@@ -67,13 +71,15 @@ before any effectful method is called:
 6. Every approval presented matches this exact proposal's hash. A
    mismatched approval is refused, never ignored.
 7. The kill switch allows execution. It fails closed.
-8. There are enough *distinct* approvers, when the tier — or `auto-off`
-   — requires approval. Approvals only count if given inside the
-   proposal's window.
+8. There are enough *distinct* approvers unless the proposal matches the
+   explicit automatic scope and the switch is clear. Approvals only count
+   if given inside the proposal's window. A partial manual approval never
+   falls back to automatic execution.
 9. The action's preconditions hold.
 10. In dry run, the plan is recorded and nothing else happens.
-11. `executing` is recorded first. If it can't be recorded, the action
-    doesn't run, and the switch trips.
+11. Automatic attempts reserve a durable slot, then `executing` is
+    recorded before any effect. A failed write prevents execution and
+    trips the switch.
 12. Execution, with the switch re-read right before the first step and
     before every step after it.
 13. Verification. A failed or raising post-check, or an action that
@@ -135,6 +141,87 @@ enabled actions, dry-run mode, kill switch and current hold first.
 All of it is tested against a local stand-in for GitHub's API
 (`tests/fake_github.py`), with the real HTTP client, so no test touches
 a real repository.
+
+## Limited automatic execution
+
+Automatic execution is disabled by default. Enabling an action with
+`RESPONSE_ENABLED_ACTIONS` alone permits manual review; it no longer makes
+Tier-A actions automatically executable. To opt in, configure the single
+supported action, `hold_promotion`, and an exact repository allowlist entry.
+The configured GitHub client's repository must match this entry exactly.
+Proposals cannot supply a repository, variable name, or custom parameters.
+
+The automatic scope is deliberately small:
+
+| Boundary | Enforcement |
+|---|---|
+| Action | Only `hold_promotion`; every other action needs approval |
+| Target | One repository; only its fixed `BANTIS_PROMOTION_HOLD` variable |
+| Trigger | Exact `RESPONSE_AUTO_POLICY_RULE` match; default `A3:composite-success` |
+| Approval count | Only proposals requiring one approval are auto-eligible; two-person proposals stay manual |
+| Incident | At most one automatic attempt per incident for the lifetime of the journal |
+| Rate | At most five automatic attempts per rolling hour; configurable down to one |
+| Active holds | One; an existing hold is never overwritten |
+| Undo | `lift_promotion_hold` still requires authenticated approval |
+| Stop | `auto-off` requires approval; `execution-off` blocks everything |
+
+`hold_promotion` pauses CI promotion without changing running services or
+removing published images. IP blocking remains an approval-only catalog
+action. The deployment gates in the design still apply; this runner does
+not establish authenticated ingestion or external audit anchoring.
+
+Start with the checked-in dry-run profile:
+
+```bash
+cd response-controller
+# Edit the two repository placeholders in the example to the same approved repository.
+source examples/limited-auto.env.example
+export BANTIS_STATE_DIR=/path/to/existing-controller-state
+# Supply RESPONSE_GITHUB_TOKEN_PROMOTION through your credential environment.
+python3 cli.py status
+```
+
+Keep the operator kill switch clear only after reviewing the enabled
+actions and target. Queue a trusted policy proposal with `params: {}` and
+`policy_rule: "A3:composite-success"`, then pass its returned action ID to
+the runner:
+
+```bash
+python3 cli.py propose proposal.json
+python3 cli.py auto-run act_example
+python3 cli.py show act_example
+python3 cli.py audit-verify
+```
+
+`auto-run` executes one queued proposal without an approval prompt. A
+trusted host-side policy process or scheduler can invoke it with the
+queued action ID; incident-to-proposal generation remains separate.
+It returns `0` for success or a dry run, `1` for a blocked or unsuccessful
+attempt, and `2` for invalid input, a closed proposal, or a storage error.
+Pending proposals with manual approvals must continue through `approve`.
+Out-of-scope proposals remain awaiting approval and have no external effect.
+
+The example caps attempts at one per rolling hour and keeps
+`RESPONSE_DRY_RUN=true`. After inspecting the recorded plan and completing
+the deployment gates, explicitly set `RESPONSE_DRY_RUN=false` and submit a
+new proposal. A dry-run proposal is closed and cannot be replayed live.
+No profile is loaded automatically and no live repository is enabled by
+this change.
+
+Automatic attempts use hash-chained `automatic_reserved` events in the
+same SQLite journal as reviews. Each reservation records the action,
+incident, proposal hash, actor, timestamp, repository and configured limit.
+Counting and reserving happen in one write transaction, so concurrent
+processes and restarts share the same budget. Reservations consume a slot
+even if the process crashes or the switch stops the action before its first
+effect; uncertain attempts are never automatically replayed. Dry runs and
+precondition failures do not consume slots. Manual approved execution does
+not consume the automatic budget.
+
+Exceeding the hourly budget trips `auto-off` and leaves the proposal
+awaiting manual approval. The tripwire stays engaged after the hour ends;
+resuming requires deliberate operator intervention as documented below.
+Failed execution, verification or audit writes still trip `execution-off`.
 
 ## Manual review: Approve / Modify / Dismiss
 
@@ -215,6 +302,7 @@ execution additionally records `executing` before external effects,
 switch interrupts it, the final outcome records the failure or halt;
 verification events only exist if verification was reached. A crash can leave
 an incomplete attempt, which must be investigated rather than replayed.
+Automatic live attempts also record `automatic_reserved` before `executing`.
 
 Executor events carry the OS executor identity (`actor`), the initiating
 operator or policy (`initiated_by`), a unique `attempt_id`, a UTC `at`
@@ -356,6 +444,10 @@ configuration before clearing the switch.
 | `BANTIS_STATE_DIR` | none — required | Holds the kill switch |
 | `RESPONSE_ENABLED_ACTIONS` | empty | Comma-separated catalog names; anything else fails at startup |
 | `RESPONSE_DRY_RUN` | `true` | Only `false` makes execution live |
+| `RESPONSE_AUTO_ACTION` | empty | Only `hold_promotion` is accepted; empty means all actions require approval |
+| `RESPONSE_AUTO_REPO` | empty | Required for automatic mode; exact `owner/name`, matching `RESPONSE_GITHUB_REPO` |
+| `RESPONSE_AUTO_POLICY_RULE` | `A3:composite-success` | Exact policy rule eligible for automatic execution |
+| `RESPONSE_AUTO_MAX_PER_HOUR` | `5` | Automatic attempt cap per rolling hour; integer from 1 to 5 |
 | `RESPONSE_APPROVER_SECRET_FILE` | none | Operator-owned private file; required by `approve`, `modify`, `dismiss` |
 | `RESPONSE_GITHUB_REPO` | none | `owner/name` the promotion hold applies to |
 | `RESPONSE_GITHUB_TOKEN_PROMOTION` | none | Fine-grained token: this repo, *Variables: write* only |

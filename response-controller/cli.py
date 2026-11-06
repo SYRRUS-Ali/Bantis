@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     propose = commands.add_parser("propose", help="Queue a policy proposal from a JSON file; never executes it.")
     propose.add_argument("file", type=Path)
     commands.add_parser("pending", help="List proposals awaiting manual review.")
+    auto = commands.add_parser("auto-run", help="Run one queued proposal within the configured automatic scope; no approval prompt.")
+    auto.add_argument("action_id")
     show = commands.add_parser("show", help="Show a proposal, its hash, status and decision history.")
     show.add_argument("action_id")
     for decision in ("approve", "modify", "dismiss"):
@@ -68,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify"}:
+    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify", "auto-run"}:
         return _review(args, config)
 
     if args.command in {"kill", "emergency-stop"}:
@@ -100,6 +102,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {reason}")
     print(f"enabled actions: {', '.join(sorted(config.enabled_actions)) or 'none'}")
     print(f"mode: {'dry run' if config.dry_run else 'LIVE'}")
+    print(f"automatic action: {config.automatic_action or 'none (approval required)'}")
+    if config.automatic_action:
+        print(f"automatic scope: {config.automatic_repo}; policy: {config.automatic_policy_rule}")
+        print(f"automatic limit: {config.automatic_max_per_hour} attempts per rolling hour; one per incident")
     return 0
 
 
@@ -155,6 +161,10 @@ def _review(args, config) -> int:
                 outcome = flow.approve(args.action_id, args.hash_prefix, actor)
                 print(outcome.model_dump_json(indent=2))
                 return 0 if outcome.status in {Status.SUCCEEDED, Status.DRY_RUN, Status.AWAITING_APPROVAL} else 1
+            elif args.command == "auto-run":
+                outcome = flow.run_automatic(args.action_id)
+                print(outcome.model_dump_json(indent=2))
+                return 0 if outcome.status in {Status.SUCCEEDED, Status.DRY_RUN} else 1
             elif args.command == "modify":
                 params = json.loads(args.params_file.read_text())
                 if not isinstance(params, dict):

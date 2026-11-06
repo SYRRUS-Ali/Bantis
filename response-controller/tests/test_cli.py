@@ -210,3 +210,49 @@ def test_emergency_button_uses_the_same_persistent_stop(tmp_path, monkeypatch):
     assert main(["emergency-button"]) == 0
     state = read_state(tmp_path)
     assert not state.execution_allowed and state.ai_off
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_cli_runs_a_scoped_hold_without_an_approval_prompt(tmp_path, monkeypatch, capsys, dry_run):
+    from fake_github import TOKEN, FakeGitHub
+    from helpers import clear_switch
+
+    from actions.promotion_hold import HOLD_VARIABLE
+    from models import Proposal
+
+    github = FakeGitHub()
+    try:
+        clear_switch(tmp_path)
+        settings = {
+            "BANTIS_STATE_DIR": str(tmp_path), "RESPONSE_ENABLED_ACTIONS": "hold_promotion,lift_promotion_hold",
+            "RESPONSE_DRY_RUN": str(dry_run).lower(), "RESPONSE_AUTO_ACTION": "hold_promotion",
+            "RESPONSE_AUTO_REPO": github.repo, "RESPONSE_AUTO_POLICY_RULE": "A3:composite-success",
+            "RESPONSE_GITHUB_REPO": github.repo, "RESPONSE_GITHUB_TOKEN_PROMOTION": TOKEN,
+            "RESPONSE_GITHUB_API_URL": github.url,
+        }
+        for key, value in settings.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr("cli.getpass.getpass", lambda _: pytest.fail("Automatic mode must not prompt"))
+        p = Proposal(incident_id="inc-auto", type="hold_promotion", policy_rule="A3:composite-success")
+        source = tmp_path / "proposal.json"
+        source.write_text(p.model_dump_json())
+        assert main(["propose", str(source)]) == 0
+        capsys.readouterr()
+        assert main(["auto-run", p.action_id]) == 0
+        assert f'"status": "{"dry_run" if dry_run else "succeeded"}"' in capsys.readouterr().out
+        assert len(github.writes()) == (0 if dry_run else 1)
+        assert (HOLD_VARIABLE in github.variables) is not dry_run
+        assert main(["auto-run", p.action_id]) == 2
+        assert "closed" in capsys.readouterr().err
+        assert main(["status"]) == 0
+        assert f"automatic scope: {github.repo}" in capsys.readouterr().out
+    finally:
+        github.close()
+
+
+def test_emergency_stop_ignores_invalid_automatic_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANTIS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("RESPONSE_AUTO_ACTION", "block_client_ip")
+    monkeypatch.setenv("RESPONSE_AUTO_MAX_PER_HOUR", "unlimited")
+    assert main(["emergency-stop"]) == 0
+    assert not read_state(tmp_path).execution_allowed
