@@ -36,6 +36,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("pending", help="List proposals awaiting manual review.")
     auto = commands.add_parser("auto-run", help="Run one queued proposal within the configured automatic scope; no approval prompt.")
     auto.add_argument("action_id")
+    sync = commands.add_parser("sync", help="Join detection incidents to recorded Copilot review context and queue policy proposals.")
+    sync.add_argument("--detection-url", default=os.environ.get("DETECTION_ENGINE_URL", "http://127.0.0.1:8001"))
+    sync.add_argument("--decision-log", type=Path, default=os.environ.get("BANTIS_DECISION_LOG"))
+    sync.add_argument("--since", required=True, help="Timezone-aware ISO timestamp; explicit backlog boundary.")
+    sync.add_argument("--execute", action="store_true", help="Also attempt pending proposals through the bounded automatic runner.")
     show = commands.add_parser("show", help="Show a proposal, its hash, status and decision history.")
     show.add_argument("action_id")
     for decision in ("approve", "modify", "dismiss"):
@@ -70,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify", "auto-run"}:
+    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify", "auto-run", "sync"}:
         return _review(args, config)
 
     if args.command in {"kill", "emergency-stop"}:
@@ -141,6 +146,18 @@ def _review(args, config) -> int:
             if args.command == "audit":
                 for entry in store.audit(action_id=args.action_id, actor=args.actor):
                     print(json.dumps(entry, sort_keys=True))
+            elif args.command == "sync":
+                from bridge import sync_incidents
+                from incident_client import IncidentClient
+
+                since = datetime.fromisoformat(args.since)
+                if since.tzinfo is None:
+                    raise ValueError("--since must include a timezone")
+                reports = sync_incidents(IncidentClient(args.detection_url), flow, state_dir=config.state_dir,
+                                         decision_log=args.decision_log, since=since, execute=args.execute)
+                print(json.dumps(reports, indent=2))
+                if any(r.get("outcome", {}).get("status") in {Status.FAILED, Status.REFUSED, Status.INVALIDATED} for r in reports):
+                    return 1
             elif args.command == "audit-verify":
                 print(json.dumps(store.verify(args.expected_head), sort_keys=True))
             elif args.command == "propose":
@@ -156,7 +173,7 @@ def _review(args, config) -> int:
             elif args.command == "show":
                 proposal, status = store.get(args.action_id)
                 _print_proposal(proposal, status)
-                print(json.dumps({"history": store.history(args.action_id)}, indent=2))
+                print(json.dumps({"context": store.context(args.action_id), "history": store.history(args.action_id)}, indent=2))
             elif args.command == "approve":
                 outcome = flow.approve(args.action_id, args.hash_prefix, actor)
                 print(outcome.model_dump_json(indent=2))

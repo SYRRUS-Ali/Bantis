@@ -15,9 +15,10 @@ The local manual review queue now supports **Approve / Modify / Dismiss**,
 with authenticated operator decisions and a persistent, hash-chained audit trail.
 An opt-in automatic runner supports only `hold_promotion`, pinned to one
 repository and policy rule, with durable attempt limits.
+The `sync` bridge now builds proposals from detection incidents and joins
+the matching Copilot decision-log recommendation as review context.
 
-**What doesn't:** external anchoring of the action log (G2), the policy that
-turns incidents into proposals, the approver-authenticated `resume`
+**What doesn't:** external anchoring of the action log (G2), the approver-authenticated `resume`
 command, and the other four actions. Nothing is enabled by
 default and the default mode is dry run. **Don't enable anything live
 until the gates in the design are met** — above all G1, authenticated
@@ -34,6 +35,10 @@ response-controller/
 ├── registry.py         # catalog type → implementation; refuses anything outside the catalog
 ├── executor.py         # decides whether a proposal may run, and runs it; Recorder protocol
 ├── automatic.py        # automatic reservation checks: one attempt per incident, rolling hourly cap
+├── incident_policy.py  # detection facts → fixed promotion-hold proposals
+├── incident_client.py  # read-only, paginated detection-engine HTTP client
+├── recommendations.py  # read-only, verified decision-log snapshot for review context
+├── bridge.py           # idempotent proposal ingestion and optional guarded execution
 ├── approval_flow.py    # persistent SQLite review queue and serialized Approve / Modify / Dismiss decisions
 ├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
 ├── github_client.py    # repository-variables API only; https only; the token never reaches a message
@@ -223,12 +228,100 @@ awaiting manual approval. The tripwire stays engaged after the hour ends;
 resuming requires deliberate operator intervention as documented below.
 Failed execution, verification or audit writes still trip `execution-off`.
 
+## Copilot-to-controller bridge
+
+The controller joins two independent inputs by `incident_id`: detection-engine
+facts determine executable proposals, and Copilot recommendations provide
+labeled review context. The Copilot keeps its existing recommend-only
+contract and receives no controller credentials or execution endpoint.
+
+```text
+Detection incidents + evidence ── deterministic policy ── proposal ── executor
+                                                        │
+Copilot worker ── verified decision log ── review context ┘
+```
+
+The implemented policy is limited to the existing `hold_promotion` action:
+
+| Incident | Required evidence | Policy rule |
+|---|---|---|
+| `composite-dependency-secret` | Exactly the incident's dependency and secret scenario events from `attack-sim`, with at least one `success` | `A3:composite-success` |
+| `untrusted-registry-pull` | The incident's single container-pull event with an explicit registry outside `docker.io` and `ghcr.io` | `A3:untrusted-registry` |
+
+Missing, duplicate or malformed evidence prevents ingestion. Summaries,
+model confidence, recommendation types and free-text descriptions never
+select action types, targets or parameters. Every generated proposal has
+empty parameters and a deterministic action ID. Its expiry is one hour
+after the incident was created, so rescanning old incidents cannot give
+them a fresh execution window. Other incident patterns receive no action
+from this policy.
+
+Run the Copilot worker normally with its durable decision log, then point
+the controller at the same database using a path readable by its OS user.
+The controller opens that database read-only and never imports Copilot
+code or the provider SDK.
+
+```bash
+cd response-controller
+export BANTIS_STATE_DIR=/path/to/existing-controller-state
+export DETECTION_ENGINE_URL=http://127.0.0.1:8001
+export BANTIS_DECISION_LOG=/path/to/copilot/decision_log.db
+
+# Explicit backlog boundary; fetch all pages and queue eligible proposals.
+python3 cli.py sync --since 2026-11-07T00:00:00Z
+python3 cli.py pending
+python3 cli.py show act_example
+
+# Optionally attempt execution through the existing bounded automatic mode.
+python3 cli.py sync --since 2026-11-07T00:00:00Z --execute
+python3 cli.py audit-verify
+```
+
+Replace `act_example` with an action ID returned by `sync`. A host scheduler
+can repeat `sync` with the same boundary: existing proposals, approvals and
+closed actions are preserved. There is no new network listener or callback
+from the model process. `--execute` does not enable an action, bypass
+approval, disable dry-run, or clear the kill switch. Without the explicit
+automatic configuration above, proposals remain awaiting manual approval.
+The default automatic policy rule permits the composite-success case only;
+the registry-pull rule needs its own explicit rule selection or approval.
+
+`show` includes the incident facts, allowlisted evidence outcomes and a
+Copilot context block labeled **untrusted review context**. Validated
+recommendations include their record ID and source hash for cross-reference.
+Raw model attempts, prompts and the Copilot request are not copied into
+the controller journal. Copilot's `requires_approval` field describes its
+informational recommendation; executable approvals remain bound to the
+controller proposal's hash.
+
+Source facts and context are journaled with proposal creation in one
+transaction. Concurrent bridge runs create one proposal. Identical scans
+add no duplicate context records. Late analysis updates the context of
+the existing proposal and any modified replacement, including closed
+proposals, without changing their hashes, inheriting approvals or replaying
+execution. An expired incident is never newly queued.
+
+A missing decision log, skipped analysis or failed analysis is displayed
+explicitly and does not suppress a qualifying incident policy action.
+Unsupported recommendation fields or executable recommendation types are
+marked invalid context. A hash-chain failure, inconsistent incident identity,
+or unreadable existing decision database trips `execution-off` and `ai-off`
+before ingestion or execution. Local hash verification does not replace
+the external anchoring required by the deployment design.
+
+`sync` returns `0` after a successful scan, including approval-pending
+proposals; `1` if an attempted execution was refused, invalidated or failed;
+and `2` for invalid configuration, source or storage errors. Detection API
+failures can be retried without creating another proposal. Scans are
+committed per incident, so a failed scan can have already processed earlier
+incidents; deterministic IDs make the retry safe.
+
 ## Manual review: Approve / Modify / Dismiss
 
 Review is a **local CLI**, as specified by the design; there is no HTTP
 approval endpoint. Proposals come from trusted policy facts or deliberate
-operator requests, never from AI output. The policy producer is not built
-yet, so `propose` accepts a proposal JSON file using the fields documented
+operator requests, never from AI output. The bridge supplies the promotion-hold
+policy; `propose` also accepts a proposal JSON file using the fields documented
 in the [design](../docs/response-controller-design.md#a-proposal).
 Only implemented action types and valid action parameters are accepted.
 
@@ -289,8 +382,8 @@ closed and expired proposals.
 **The SQLite journal is hash-chained, but external anchoring required by
 G2 remains an operator deployment responsibility.** It supplies durable
 local review and replay protection. ADR 0006 remains Proposed and all
-deployment gates still apply. No dashboard, automated policy producer, authenticated
-resume or new action implementation is introduced here.
+deployment gates still apply. A dashboard, authenticated resume and the
+remaining catalog action implementations are still pending.
 
 ## Audit trail
 
@@ -452,13 +545,16 @@ configuration before clearing the switch.
 | `RESPONSE_GITHUB_REPO` | none | `owner/name` the promotion hold applies to |
 | `RESPONSE_GITHUB_TOKEN_PROMOTION` | none | Fine-grained token: this repo, *Variables: write* only |
 | `RESPONSE_GITHUB_API_URL` | `https://api.github.com` | https only (plain http only to loopback, for tests) |
+| `DETECTION_ENGINE_URL` | `http://127.0.0.1:8001` | Detection incidents API used by `sync`; `--detection-url` overrides |
+| `BANTIS_DECISION_LOG` | none | Optional read-only Copilot decision database for `sync`; `--decision-log` overrides |
 
 ## Separation from the AI
 
 `tests/test_separation.py` fails if anything here imports the Anthropic
 SDK or an `ai-copilot` module, or reaches another component through
 `sys.path`. Proposals come from incident facts, never from model output
-(design, Principle 1).
+(design, Principle 1). The recommendation reader only supplies context;
+the deterministic policy does not accept recommendations as an input.
 
 ## Running the tests
 

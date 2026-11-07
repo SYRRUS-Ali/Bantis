@@ -15,6 +15,15 @@ This is a separate, independently-deployable component, same
 relationship `range/`, `attack-sim/`, and `detection-engine/` already
 have to each other.
 
+The [Response Controller bridge](../response-controller/README.md#copilot-to-controller-bridge)
+can now read this component's decision database to show recorded recommendations
+alongside policy proposals. Run the worker with a durable `BANTIS_DECISION_LOG`
+path and give the controller read access to that same database. The controller
+verifies the decision chain and joins records by incident ID. Copilot output
+remains review context: executable proposals come independently from detection
+facts, and missing or late analysis does not suppress containment. No controller
+credential or execution capability is added to this component.
+
 ## Structure
 
 ```
