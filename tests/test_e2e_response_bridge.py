@@ -359,4 +359,4 @@ def test_attack_to_response_audit_pipeline(stack, tmp_path, attack_status):
     # Fresh processes must neither call the provider nor repeat the response.
     run_component("ai-copilot", ["-c", _ANALYZE_PIPELINE], {**env, "TEST_EXPECT_ANALYSIS": "0"})
     assert sync(stack)[0]["status"] == report["status"]
-    assert len(stack.github.writes())0 == (1 if attack_status == "success" else 0)
+    assert len(stack.github.writes()) == (1 if attack_status == "success" else 0)
