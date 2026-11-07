@@ -133,6 +133,15 @@ class ReviewStore:
     def history(self, action_id: str) -> list[dict]:
         return self.audit(action_id=action_id)
 
+    def context(self, action_id: str) -> dict:
+        context = {}
+        for entry in self.history(action_id):
+            if entry["event"] == "incident_facts":
+                context["incident"] = entry["facts"]
+            elif entry["event"] == "copilot_context":
+                context["copilot"] = entry["context"]
+        return context
+
     def record(self, entry: dict) -> None:
         if not self.db.in_transaction:
             with self.transaction():
@@ -179,6 +188,37 @@ class ApprovalFlow:
         if action is None:
             raise ReviewError(f"{proposal.type!r} has no implementation")
         action.parse_params(proposal)
+
+    def ingest_policy(self, proposal: Proposal, facts: dict, context: dict, *, now: datetime) -> str:
+        """Create once from policy; refresh display context without changing approvals."""
+        self._validate(proposal)
+        with self.store.locked(), self.store.transaction():
+            self.store.verify()
+            row = self.store.db.execute("SELECT payload, status FROM proposals WHERE action_id = ?",
+                                        (proposal.action_id,)).fetchone()
+            if row is None:
+                if not proposal.created_at <= now < proposal.expires_at:
+                    return "expired"
+                self.store._insert(proposal)
+                self._event(proposal, "proposed", "incident-policy", now, proposal=proposal.model_dump(mode="json"))
+                self._event(proposal, "incident_facts", "incident-policy", now, facts=facts)
+                status = "pending"
+            else:
+                if Proposal.model_validate_json(row["payload"]).proposal_hash != proposal.proposal_hash:
+                    raise ReviewError("existing policy proposal differs from the incident facts")
+                status = row["status"]
+            subject = proposal
+            seen = set()
+            while subject.action_id not in seen:
+                seen.add(subject.action_id)
+                history = self.store.history(subject.action_id)
+                if self.store.context(subject.action_id).get("copilot") != context:
+                    self._event(subject, "copilot_context", "recommendation-reader", now, context=context)
+                replacement = next((e["replacement_id"] for e in reversed(history) if e["event"] == "modified"), None)
+                if replacement is None:
+                    break
+                subject, _ = self.store.get(replacement)
+            return status
 
     def run_automatic(self, action_id: str, *, now: datetime | None = None) -> Outcome:
         """Run one pending proposal without supplying or reusing manual approvals."""
@@ -257,6 +297,11 @@ class ApprovalFlow:
             self._event(original, "modified", actor, now, reason=reason, replacement_id=replacement.action_id)
             self._event(replacement, "proposed", actor, now, replaces_id=action_id,
                         proposal=replacement.model_dump(mode="json"))
+            context = self.store.context(original.action_id)
+            if "incident" in context:
+                self._event(replacement, "incident_facts", actor, now, facts=context["incident"])
+            if "copilot" in context:
+                self._event(replacement, "copilot_context", actor, now, context=context["copilot"])
             return replacement
 
     def dismiss(self, action_id: str, prefix: str, actor: str, reason: str,

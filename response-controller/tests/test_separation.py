@@ -1,4 +1,4 @@
-"""The controller must never read model output (design, Principle 1):
+"""Recommendation context must remain separate from executable policy:
 nothing here may import the AI provider's SDK or any ai-copilot module."""
 
 import ast
