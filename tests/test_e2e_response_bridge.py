@@ -40,7 +40,7 @@ assert len(worker.poll_once()) == 1
 """
 
 
-def request(url, method, path, body=None):
+def http_request(url, method, path, body=None):
     parsed = urlparse(url)
     connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
     try:
@@ -54,13 +54,14 @@ def request(url, method, path, body=None):
 
 
 @pytest.fixture
-def stack(tmp_path):
+def stack(tmp_path, request):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("RESPONSE_", "BANTIS_", "CORRELATION_"))}
-    env.update(DATABASE_URL=f"sqlite:///{tmp_path}/detection.db", CORRELATION_INTERVAL_SECONDS="0")
+    env.update(DATABASE_URL=f"sqlite:///{tmp_path}/detection.db",
+               CORRELATION_INTERVAL_SECONDS=getattr(request, "param", "0"))
     detection_url = f"http://127.0.0.1:{port}"
     command = ("from app.main import app; from app.db import Base,engine; "
                "Base.metadata.create_all(engine); import uvicorn; "
@@ -73,7 +74,7 @@ def stack(tmp_path):
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 try:
-                    if request(detection_url, "GET", "/incidents")[0] == 200:
+                    if http_request(detection_url, "GET", "/incidents")[0] == 200:
                         break
                 except OSError:
                     pass
@@ -120,7 +121,7 @@ def run_component(component, arguments, env, *, input_text=None, expected=0):
 
 def seed_incident(stack, success):
     for event_id, scenario in [("dep", "malicious-dependency"), ("secret", "leaked-secret")]:
-        status, _ = request(stack.url, "POST", "/events", {
+        status, _ = http_request(stack.url, "POST", "/events", {
             "event_id": event_id, "timestamp": datetime.now(UTC).isoformat(), "level": "INFO",
             "logger": "attack_sim", "source": "attack-sim", "event_type": "attack_scenario_run", "message": "test",
             "details": {"scenario": scenario, "status": "success" if success else "failure",
@@ -207,3 +208,155 @@ def test_tampered_worker_decision_log_stops_execution_before_any_github_request(
     state = json.loads((stack.state / "kill-switch.tripped").read_text())
     assert state["level"] == "execution-off" and state["ai_off"]
     assert stack.github.requests == []
+
+_RUN_ATTACKS = r"""
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+from logging_config import configure_logging
+from scenarios import malicious_dependency as dependency, leaked_secret as secret
+from scenarios.base import ScenarioStatus
+
+configure_logging()
+
+root = Path(os.environ["TEST_ATTACK_DIR"])
+requirements = root / "requirements.txt"
+original = "example-package==1.0.0\n"
+requirements.write_text(original)
+expected = ScenarioStatus(os.environ["TEST_ATTACK_STATUS"])
+calls = []
+
+def tool(command, **kwargs):
+    calls.append(command[0])
+    if command[0] == "docker":
+        if calls.count("docker") == 1:
+            assert dependency._INJECTED_LINE in requirements.read_text()
+        else:
+            assert requirements.read_text() == original
+        return subprocess.CompletedProcess(command, 0 if expected == ScenarioStatus.SUCCESS else 1, "fixture build", "")
+    if command[0] == "git":
+        return subprocess.CompletedProcess(command, 0, "", "")
+    assert command[0] == "gitleaks", command
+    assert (Path(command[2]) / "config.py").read_text() == secret._LEAKED_FILE_CONTENT
+    return subprocess.CompletedProcess(command, 0 if expected == ScenarioStatus.SUCCESS else 1,
+        "Secret: " + secret._FAKE_AWS_ACCESS_KEY_ID, "")
+
+with patch.object(dependency, "_REQUIREMENTS_FILE", requirements), patch("subprocess.run", side_effect=tool):
+    for cls in (dependency.MaliciousDependencyScenario, secret.LeakedSecretScenario):
+        scenario = cls()
+        try:
+            result = scenario.run()
+            assert result.status == expected, result
+            scenario.log_result(result)
+            scratch = getattr(scenario, "_workdir", None)
+        finally:
+            scenario.cleanup()
+        assert scratch is None or not scratch.exists()
+assert requirements.read_text() == original
+assert "docker" in calls and "git" in calls and "gitleaks" in calls
+"""
+
+_ANALYZE_PIPELINE = r"""
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from decision_log import DecisionLog
+from detection_client import DetectionEngineClient
+from models import AnalysisTrace, AttemptRecord, CopilotResponse, ProposedAction
+from worker import CopilotWorker
+
+class Provider:
+    calls = 0
+    def analyze_traced(self, request):
+        self.calls += 1
+        assert request.incident.pattern == "composite-dependency-secret"
+        assert {e.scenario for e in request.evidence_timeline} == {"malicious-dependency", "leaked-secret"}
+        assert {e.status for e in request.evidence_timeline} == {os.environ["TEST_ATTACK_STATUS"]}
+        assert "AKIAFAKEBANTISATSIM1" not in request.model_dump_json()
+        response = CopilotResponse(incident_id=request.incident.incident_id,
+            reasoning="Dependency and credential evidence requires operator review.", confidence=0.99,
+            proposed_action=ProposedAction(type="flag_for_review", description="Review the correlated evidence."),
+            model="local-pipeline-provider", generated_at=datetime.now(timezone.utc))
+        return AnalysisTrace(response=response,
+            attempts=[AttemptRecord(number=1, raw_output=response.model_dump_json())])
+
+provider = Provider()
+log = DecisionLog(os.environ["BANTIS_DECISION_LOG"])
+worker = CopilotWorker(DetectionEngineClient(os.environ["DETECTION_ENGINE_URL"]), provider,
+    decision_log=log, start_from=datetime.now(timezone.utc) - timedelta(minutes=5))
+assert len(worker.poll_once()) == int(os.environ["TEST_EXPECT_ANALYSIS"])
+assert provider.calls == int(os.environ["TEST_EXPECT_ANALYSIS"])
+assert log.verify() == []
+"""
+
+
+@pytest.mark.parametrize("stack", ["0.1"], indirect=True)
+@pytest.mark.parametrize("attack_status", ["success", "failure"])
+def test_attack_to_response_audit_pipeline(stack, tmp_path, attack_status):
+    """Real scenario logging, scheduled detection, worker, response, and audit."""
+    attack_dir = tmp_path / "attacks"
+    attack_dir.mkdir()
+    env = {**stack.env, "BANTIS_ENV": "range-local", "TEST_ATTACK_DIR": str(attack_dir),
+           "TEST_ATTACK_STATUS": attack_status, "TEST_EXPECT_ANALYSIS": "1"}
+    output = run_component("attack-sim", ["-c", _RUN_ATTACKS], env)
+    emitted = [json.loads(line) for line in output.splitlines()]
+    event_ids = {event["event_id"] for event in emitted if event.get("event_type") == "attack_scenario_run"}
+    assert len(event_ids) == 2
+
+    # No direct correlation call: the API's scheduler must detect the attack.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        status, listing = http_request(stack.url, "GET", "/incidents")
+        assert status == 200
+        if listing["total"]:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("scheduled detection did not create an incident from scenario events")
+    [incident] = listing["items"]
+    incident_id = incident["incident_id"]
+    assert incident["pattern"] == "composite-dependency-secret"
+    assert set(incident["correlated_event_ids"]) == event_ids
+    assert incident["severity"] == ("critical" if attack_status == "success" else "high")
+    status, evidence = http_request(stack.url, "GET", f"/incidents/{incident_id}/events")
+    assert status == 200 and {event["event_id"] for event in evidence} == event_ids
+
+    run_component("ai-copilot", ["-c", _ANALYZE_PIPELINE], env)
+    decision = json.loads(run_component("ai-copilot", ["decision_log.py", "show", incident_id], env))
+    assert decision["record"]["response"]["incident_id"] == incident_id
+    assert {e["event_id"] for e in decision["record"]["request"]["evidence_timeline"]} == event_ids
+    assert len(decision["record"]["attempts"]) == 1
+    assert b"AKIAFAKEBANTISATSIM1" not in Path(env["BANTIS_DECISION_LOG"]).read_bytes()
+
+    [report] = sync(stack)
+    assert report["incident_id"] == incident_id
+    assert report["copilot"]["status"] == "available"
+    if attack_status == "failure":
+        assert report["status"] == "no_policy_action"
+        assert stack.github.requests == []
+    else:
+        assert report["status"] == "succeeded"
+        action_id = report["action_id"]
+        assert len(stack.github.writes()) == 1
+        assert incident_id in stack.github.variables["BANTIS_PROMOTION_HOLD"]
+        audit = run_component("response-controller", ["cli.py", "audit", "--action-id", action_id], env)
+        entries = [json.loads(line) for line in audit.splitlines()]
+        events = [entry["event"] for entry in entries]
+        for name in ("proposed", "incident_facts", "copilot_context", "executed", "verified", "outcome"):
+            assert name in events
+        assert events.index("copilot_context") < events.index("executed") < events.index("verified") < events.index("outcome")
+        assert all(entry["incident_id"] == incident_id and entry["action_id"] == action_id for entry in entries)
+        facts = next(entry["facts"] for entry in entries if entry["event"] == "incident_facts")
+        assert {e["event_id"] for e in facts["evidence"]} == event_ids
+        assert next(entry for entry in entries if entry["event"] == "verified")["verified"] is True
+        assert entries[-1]["status"] == "succeeded"
+        assert "github_pat_" not in audit and "AKIAFAKEBANTISATSIM1" not in audit
+        checkpoint = json.loads(run_component("response-controller", ["cli.py", "audit-verify"], env))
+        assert checkpoint["count"] == len(entries)
+        run_component("response-controller", ["cli.py", "audit-verify", "--expected-head", checkpoint["head"]], env)
+
+    # Fresh processes must neither call the provider nor repeat the response.
+    run_component("ai-copilot", ["-c", _ANALYZE_PIPELINE], {**env, "TEST_EXPECT_ANALYSIS": "0"})
+    assert sync(stack)[0]["status"] == report["status"]
+    assert len(stack.github.writes())0 == (1 if attack_status == "success" else 0)
