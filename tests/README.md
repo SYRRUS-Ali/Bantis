@@ -23,7 +23,9 @@ then invokes the controller in separate processes. A local GitHub API stand-in
 receives any action effects; no provider API or real GitHub repository is used.
 Tests cover bounded automatic execution, authenticated approval, dry-run,
 emergency stop, late recommendations, replay protection, decision-log tampering,
-and the inability of model advice to trigger or suppress a policy action.
+authenticated rollback across controller restarts, and the inability of model
+advice to trigger or suppress a policy action. Rollback requests only queue a
+proposal; a fresh authenticated approval restores the saved target state.
 The test environment must permit loopback HTTP listeners.
 
 ## Attack to audit CI check

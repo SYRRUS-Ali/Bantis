@@ -186,6 +186,38 @@ def test_model_advice_cannot_trigger_an_action_when_both_attacks_were_defended(s
     assert stack.github.requests == []
 
 
+def test_executed_policy_action_can_be_rolled_back_across_controller_processes(stack):
+    seed_incident(stack, success=True)
+    [report] = sync(stack)
+    assert report["status"] == "succeeded"
+    original_id = report["action_id"]
+    shown = run_component("response-controller", ["cli.py", "show", original_id], stack.env)
+    original = json.JSONDecoder().raw_decode(shown)[0]
+    stack.env["RESPONSE_ENABLED_ACTIONS"] += ",rollback_action"
+    arguments = ["cli.py", "rollback", original_id, original["proposal_hash"][:12],
+                 "--reason", "False positive confirmed"]
+    writes = len(stack.github.writes())
+    # Authentication failure cannot queue rollback or affect the repository.
+    run_component("response-controller", arguments, stack.env, input_text="wrong-secret\n", expected=2)
+    output = run_component("response-controller", arguments, stack.env, input_text="local-test-secret\n")
+    rollback = json.JSONDecoder().raw_decode(output)[0]
+    assert rollback["params"]["original_action_id"] == original_id
+    assert len(stack.github.writes()) == writes
+    repeated = run_component("response-controller", arguments, stack.env, input_text="local-test-secret\n")
+    assert json.JSONDecoder().raw_decode(repeated)[0]["action_id"] == rollback["action_id"]
+    approval = ["cli.py", "approve", rollback["action_id"], rollback["proposal_hash"][:12]]
+    outcome = json.loads(run_component("response-controller", approval, stack.env, input_text="local-test-secret\n"))
+    assert outcome["status"] == "succeeded" and outcome["detail"]["rollback_of"] == original_id
+    assert stack.github.variables == {}
+    assert len(stack.github.writes()) == writes + 1
+    run_component("response-controller", approval, stack.env, input_text="local-test-secret\n", expected=2)
+    run_component("response-controller", arguments, stack.env, input_text="local-test-secret\n", expected=2)
+    # Synchronizing the original incident does not reinstate the rolled-back hold.
+    sync(stack)
+    assert len(stack.github.writes()) == writes + 1
+    run_component("response-controller", ["cli.py", "audit-verify"], stack.env)
+
+
 def test_late_worker_analysis_attaches_to_a_completed_action_without_replaying_it(stack):
     seed_incident(stack, success=True)
     [first] = sync(stack)
