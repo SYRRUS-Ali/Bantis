@@ -277,13 +277,17 @@ Full architecture and the recommend-only principle in detail:
 
 ### Known limitations
 
-- **No approval workflow or dashboard yet** — recommendations reach the
-  operator as JSON lines and through `decision_log.py show`.
+- **The Copilot remains recommend-only.** The separate Response Controller now
+  provides local authenticated approval; a dashboard is still outstanding.
 - **Prompt injection is reduced, not prevented** — recommend-only bounds
   a successful one to a misleading recommendation a person reviews.
 - **Explanation quality is not yet scored** against real model output.
 
 ## Response Controller documentation
+
+Sprint 5 (M5) delivers the local response path. The
+[Sprint 5 closure](docs/m5-closure.md) records delivered work, verification,
+limitations, and the next sprint's priorities.
 
 The controller implements local review, scoped promotion holds, and authenticated
 rollback. Actions are disabled by default and dry run is the default. ADR 0006

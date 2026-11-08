@@ -10,6 +10,8 @@ Read the [current design](../docs/response-controller-design.md) for components,
 state transitions, rollback, and deployment gates. The
 [security guarantees](../docs/response-controller-security.md) map each control
 to its implementation and tests, and describe the assumptions and remaining gaps.
+The [Sprint 5 closure](../docs/m5-closure.md) summarizes the delivered milestone,
+verification results, limitations, and work carried forward.
 
 **What exists:** the general interface every action implements, the
 closed catalog, the proposal and approval model, the kill switch, an
