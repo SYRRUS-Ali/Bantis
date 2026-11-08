@@ -1,7 +1,5 @@
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,40 +8,6 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "detection-engine"))
 sys.path.insert(0, str(_REPO_ROOT / "attack-sim"))
-
-_PORT = 18766
-_DETECTION_ENGINE_URL = f"http://127.0.0.1:{_PORT}"
-
-
-@pytest.fixture
-def live_detection_engine(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/e2e.db")
-    monkeypatch.setenv("CORRELATION_INTERVAL_SECONDS", "0")  # this test correlates by hand
-
-    import uvicorn
-
-    from app.db import Base, engine
-    from app.main import app as detection_engine_app
-
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-
-    config = uvicorn.Config(detection_engine_app, host="127.0.0.1", port=_PORT, log_level="warning")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-
-    for _ in range(50):
-        if server.started:
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail("detection-engine server did not start in time")
-
-    yield engine
-
-    server.should_exit = True
-    thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -75,9 +39,9 @@ def real_scenarios(tmp_path, monkeypatch):
 
 
 def test_real_dependency_and_secret_scenarios_form_one_composite_incident(
-    live_detection_engine, real_scenarios, monkeypatch
+    detection_stack, real_scenarios, monkeypatch
 ):
-    monkeypatch.setenv("DETECTION_ENGINE_URL", _DETECTION_ENGINE_URL)
+    monkeypatch.setenv("DETECTION_ENGINE_URL", detection_stack.url)
 
     from logging_config import configure_logging
 
@@ -101,7 +65,7 @@ def test_real_dependency_and_secret_scenarios_form_one_composite_incident(
 
     from sqlalchemy.orm import Session
 
-    with Session(live_detection_engine) as session:
+    with Session(detection_stack.engine) as session:
         stored = session.query(EventORM).all()
         assert len(stored) == 2
         stored_ids = {event.event_id for event in stored}

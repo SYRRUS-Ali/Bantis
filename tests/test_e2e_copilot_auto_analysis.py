@@ -1,8 +1,8 @@
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -10,38 +10,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "detection-engine"))
 sys.path.insert(0, str(_REPO_ROOT / "ai-copilot"))
 
-_PORT = 18768
 _FAKE_SECRET = "AKIAFAKEBANTISATSIM1"
-
-
-@pytest.fixture
-def live_detection_engine(request, tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/e2e.db")
-    # "0": the test correlates by hand. Parametrize to run the real scheduler.
-    monkeypatch.setenv("CORRELATION_INTERVAL_SECONDS", getattr(request, "param", "0"))
-
-    import uvicorn
-
-    from app.db import Base, engine
-    from app.main import app as detection_engine_app
-
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-
-    server = uvicorn.Server(uvicorn.Config(detection_engine_app, host="127.0.0.1", port=_PORT, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    for _ in range(50):
-        if server.started:
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail("detection-engine server did not start in time")
-
-    yield f"http://127.0.0.1:{_PORT}"
-
-    server.should_exit = True
-    thread.join(timeout=5)
 
 
 def _post_event(base_url, event_id, scenario, mitre, **details):
@@ -60,10 +29,15 @@ def _post_event(base_url, event_id, scenario, mitre, **details):
             "details": {"scenario": scenario, "status": "failure", "mitre_technique": mitre, **details},
         }
     )
-    connection = http.client.HTTPConnection("127.0.0.1", _PORT, timeout=5)
-    connection.request("POST", "/events", body=body, headers={"Content-Type": "application/json"})
-    assert connection.getresponse().status == 201
-    connection.close()
+    parsed = urlparse(base_url)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    try:
+        connection.request("POST", "/events", body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 201
+    finally:
+        connection.close()
 
 
 def _correlate():
@@ -97,21 +71,21 @@ class RecordingProvider:
         )
 
 
-def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_engine, tmp_path):
+def test_a_new_incident_is_analyzed_automatically_and_only_once(detection_stack, tmp_path):
     from decision_log import DecisionLog
     from detection_client import DetectionEngineClient
     from worker import CopilotWorker
 
     log_path = tmp_path / "decisions.db"
 
-    _post_event(live_detection_engine, "old-1", "compromised-ci-step", "T1195.002")
-    _post_event(live_detection_engine, "old-2", "typosquatting", "T1195.001")
+    _post_event(detection_stack.url, "old-1", "compromised-ci-step", "T1195.002")
+    _post_event(detection_stack.url, "old-2", "typosquatting", "T1195.001")
     [old_incident] = _correlate()
 
     provider = RecordingProvider()
     delivered = []
     worker = CopilotWorker(
-        DetectionEngineClient(live_detection_engine),
+        DetectionEngineClient(detection_stack.url),
         provider,
         on_result=lambda incident, response: delivered.append(incident["incident_id"]),
         decision_log=DecisionLog(log_path),
@@ -120,11 +94,11 @@ def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_e
     assert worker.poll_once() == []
 
     _post_event(
-        live_detection_engine, "dep-1", "malicious-dependency", "T1195.001",
+        detection_stack.url, "dep-1", "malicious-dependency", "T1195.001",
         artifact="fake-package==0.0.0", tool_returncode=1, tool_output_tail="no matching distribution",
     )
     _post_event(
-        live_detection_engine, "sec-1", "leaked-secret", "T1552.001",
+        detection_stack.url, "sec-1", "leaked-secret", "T1552.001",
         artifact="config.py", tool_returncode=1, tool_output_tail=f"Secret: {_FAKE_SECRET}",
     )
     [new_incident] = _correlate()
@@ -149,8 +123,8 @@ def test_a_new_incident_is_analyzed_automatically_and_only_once(live_detection_e
     assert _FAKE_SECRET.encode() not in log_path.read_bytes()
 
 
-@pytest.mark.parametrize("live_detection_engine", ["0.2"], indirect=True)
-def test_with_no_one_calling_correlation_the_copilot_still_gets_the_incident(live_detection_engine, tmp_path):
+@pytest.mark.parametrize("detection_stack", ["0.2"], indirect=True)
+def test_with_no_one_calling_correlation_the_copilot_still_gets_the_incident(detection_stack, tmp_path):
     """The deployed path end to end: events in, detection-engine's own
     scheduler correlates, the worker analyzes. Before the scheduler
     existed, this exact setup produced no incident at all.
@@ -162,14 +136,14 @@ def test_with_no_one_calling_correlation_the_copilot_still_gets_the_incident(liv
     provider = RecordingProvider()
     delivered = []
     worker = CopilotWorker(
-        DetectionEngineClient(live_detection_engine),
+        DetectionEngineClient(detection_stack.url),
         provider,
         on_result=lambda incident, response: delivered.append(incident["pattern"]),
         decision_log=DecisionLog(tmp_path / "decisions.db"),
     )
 
-    _post_event(live_detection_engine, "dep-1", "malicious-dependency", "T1195.001", artifact="fake==0.0.0")
-    _post_event(live_detection_engine, "sec-1", "leaked-secret", "T1552.001", artifact="config.py")
+    _post_event(detection_stack.url, "dep-1", "malicious-dependency", "T1195.001", artifact="fake==0.0.0")
+    _post_event(detection_stack.url, "sec-1", "leaked-secret", "T1552.001", artifact="config.py")
 
     deadline = time.monotonic() + 10
     while not delivered and time.monotonic() < deadline:
