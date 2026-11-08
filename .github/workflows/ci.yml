@@ -278,7 +278,7 @@ jobs:
           -r response-controller/requirements.txt
 
       - name: Test attack, detection, analysis, response, and audit
-        run: python -m pytest tests/test_e2e_response_bridge.py -v --junitxml=test-results/security-e2e.xml
+        run: python -m pytest tests -v --junitxml=test-results/security-e2e.xml
 
   push:
     name: Push to GHCR
