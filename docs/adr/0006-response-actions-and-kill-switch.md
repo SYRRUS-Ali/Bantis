@@ -3,6 +3,13 @@
 **Date:** 2026-10-20
 **Status:** Proposed
 
+**Implementation reference:** The [current design](../response-controller-design.md)
+distinguishes enforced controls from planned capabilities. Authenticated resume,
+automatic approval invalidation on resume, and external audit anchoring below
+remain requirements, not completed guarantees. Local review, scoped automatic
+holds, rollback, and audit verification exist; accepting this ADR or enabling a
+deployment still requires its gates to be satisfied.
+
 ## Context
 [ADR 0004](0004-recommend-only-default.md) makes Bantis recommend-only
 and allows "a narrow, explicitly configured whitelist of safe,

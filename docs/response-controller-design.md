@@ -1,375 +1,284 @@
 # Response Controller Design: Whitelist, Approval Flow, Kill Switch
 
-**Status: design; skeleton built.** Bantis is recommend-only today
-([ADR 0004](adr/0004-recommend-only-default.md)), and stays so until
-[ADR 0006](adr/0006-response-actions-and-kill-switch.md) is accepted
-**and** the gates below are met. This document is what that ADR decides
-on. [`response-controller/`](../response-controller/README.md) has the
-action interface, catalog, kill switch and executor rules, and the first
-action: A3 `hold_promotion` with its undo B3, plus the CI change below.
-Nothing is enabled by default, and nothing should be enabled live before
-the gates are met.
+## Status and scope
 
-It answers the five questions
-[`ai-copilot-architecture.md`](ai-copilot-architecture.md#changing-the-principle)
-sets for any move away from recommend-only:
+The controller implements local review, bounded automatic promotion holds,
+verified execution, rollback, and a local hash-chained audit journal.
+[ADR 0006](adr/0006-response-actions-and-kill-switch.md) remains **Proposed**.
+Authenticated event ingestion, external audit anchoring, and deployment isolation
+are still outstanding gates. All actions ship disabled, dry run is the default,
+and automatic mode is off.
 
-| Question | Answered in |
-|---|---|
-| Which actions, exactly, and how are they undone? | [The action catalog](#the-action-catalog) |
-| Where does execution run? | [Components and separation](#components-and-separation) |
-| What is an approval? | [The approval flow](#the-approval-flow) |
-| Is the input trustworthy enough? | [Gates before anything executes](#gates-before-anything-executes) |
-| What stops a burst of approvals or actions? | [Limits](#limits) and [The kill switch](#the-kill-switch) |
+This document describes current behavior and labels planned capabilities
+separately. The [component guide](../response-controller/README.md) contains
+configuration and command examples. The AI Copilot remains recommend-only under
+[ADR 0004](adr/0004-recommend-only-default.md).
 
-## Principles
+## Responsibilities and trust boundaries
 
-1. **The AI never causes an action.** Executable actions are proposed by
-   a deterministic policy from detection-engine's rule-based incident
-   facts. The AI Copilot's analysis is shown next to a proposal as
-   context for a human; it cannot trigger, cancel, widen or parameterize
-   an action. A prompt injection therefore gains nothing here — it can
-   neither start containment nor suppress it.
-2. **Nothing executes on free text.** An action's parameters are
-   computed by the response controller from verified facts (a promotion
-   history, a recorded image digest), never taken from model output or
-   copied from an event's free-text fields.
-3. **Auto-execution only in the safe direction.** An action on the
-   whitelist adds evidence or friction — it preserves, notifies or holds.
-   It never removes a running service, deletes data, or changes code.
-4. **Every action has a tested undo**, or is purely additive.
-5. **Stopping is easy; resuming is deliberate.** Anyone with host access
-   can halt execution with one command and no approval; resuming needs
-   an approver, a reason and a record.
-6. **Fail closed.** If the controller can't read the kill switch, write
-   its audit log, or verify an approval, it doesn't act.
-
-## Components and separation
-
-```
- detection-engine ──GET incidents──▶ response controller (new, separate process + OS user)
-                                        │  policy: incident facts → proposals
-                                        │  executor: approved/whitelisted → act
-                                        │  reads kill switch before every action
-                                        ▼
-                                   action log (hash-chained, anchored)
-                                        ▲                      │ scoped credentials
- operator ──approve / reject / kill──────┘                      ▼
-                                              GitHub repo variable, workflow dispatch,
-                                              range nginx config, Telegram, evidence store
-
- ai-copilot (unchanged: no capability; its analysis is read for display only)
+```mermaid
+flowchart LR
+    D[Detection incidents and evidence] --> P[Deterministic policy]
+    P --> Q[Local proposal and review queue]
+    C[Copilot decision database] --> R[Read-only recommendation verifier]
+    R --> V[Untrusted review context]
+    V --> Q
+    O[Host operator and approver secret] --> Q
+    Q --> E[Guarded executor]
+    K[Operator stop and tripwire files] --> E
+    E --> J[Local SQLite audit journal]
+    E --> G[Configured GitHub repository variable]
 ```
 
-Three roles, never combined in one component:
+Policy, review, and execution are logical responsibilities within the controller,
+not independently isolated services. The local CLI has no approval HTTP endpoint.
+Dedicated OS users and filesystem permissions must be provisioned at deployment.
+The controller neither imports an AI provider SDK nor executes model descriptions.
 
-| Role | Who | Can |
+| Responsibility | Implementation | Authority |
 |---|---|---|
-| **Proposer** | the controller's policy | Turn incident facts into proposals from the catalog |
-| **Approver** | a human operator | Approve or reject one exact proposal |
-| **Executor** | the controller's executor | Carry out a proposal that is whitelisted or approved, once |
+| Fetch evidence | [incident_client.py](../response-controller/incident_client.py) | Read-only detection API |
+| Choose an action | [incident_policy.py](../response-controller/incident_policy.py) | Validated incident fields and exact evidence membership |
+| Join analysis for display | [bridge.py](../response-controller/bridge.py), [recommendations.py](../response-controller/recommendations.py) | Read-only decision database; no action selection authority |
+| Queue and review | [approval_flow.py](../response-controller/approval_flow.py), [cli.py](../response-controller/cli.py) | Trusted host access; approval decisions additionally require an operator secret |
+| Enforce execution rules | [executor.py](../response-controller/executor.py), [config.py](../response-controller/config.py) | Enabled implementation, approvals or exact automatic scope, readable stop state |
+| Apply and undo effects | [promotion_hold.py](../response-controller/actions/promotion_hold.py), [rollback.py](../response-controller/rollback.py) | Configured repository credential and audited rollback state |
 
-The AI Copilot holds none of them. It stays a component with no way to
-act, and `ai-copilot/tests/test_recommend_only.py` stays in force
-unchanged: execution lives in a different component, with different
-credentials, so the process that reads attacker-influenced text never
-holds the keys to act.
+Recommendation absence, provider failure, confidence, and prose do not select or
+suppress a policy action. A corrupt decision database deliberately stops `sync`
+and trips execution and AI stops. Model prose can still influence a human reading
+it; separation guarantees concern the executable policy path. Event ingestion is
+currently unauthenticated: schema-valid facts do not prove their producer.
 
-The controller runs as its own OS user. It can read the kill switch but
-not write it, and each of its credentials covers exactly one action
-type (a separate token per capability, below).
+## Action catalog and policy
 
-## The action catalog
+The closed [catalog](../response-controller/catalog.py) fixes tiers. Configuration
+cannot introduce an unknown action or implement a catalog entry. Tier A means
+eligible for an explicitly configured scope, not automatic by default.
 
-### Eligibility for the whitelist
+| Action | Tier | Current implementation |
+|---|---|---|
+| `hold_promotion` | A | Set the fixed `BANTIS_PROMOTION_HOLD` variable without replacing an existing hold |
+| `lift_promotion_hold` | B | Delete the configured repository's hold after approval |
+| `rollback_action` | B | Restore the saved target state through a separate review |
+| `preserve_evidence` | A | Catalog only; additive evidence storage is planned |
+| `notify_channel` | A | Catalog only; operator notifications are planned |
+| `rollback_latest` | B | Catalog only; controller dispatch of the existing CI rollback workflow is planned |
+| `block_client_ip` | B | Catalog only; generated nginx deny rules and expiry are planned |
 
-An action may be auto-executed only if **all** of these hold:
+Hold and lift accept only empty parameters. The repository and variable are not
+selected by incident prose or advice. Rollback accepts an original action ID and
+snapshot hash; its target comes from the audited snapshot and must match current
+repository API configuration. Arbitrary commands, credentials, deletion of data,
+source edits, service stops, and host firewall changes remain outside the catalog.
+Changing the catalog requires an ADR amendment.
 
-| Criterion | Why |
-|---|---|
-| Purely additive, or reversible by a documented, tested undo | A wrong action must be cheap to correct |
-| Moves in the safe direction: preserves, notifies or holds; never stops a service or deletes anything | A false positive must not become an outage Bantis caused |
-| One named target inside Bantis's own scope | Bounded blast radius |
-| Idempotent | Retries and duplicate incidents are harmless |
-| Parameters derived from verified facts, never free text | Injection can't choose the target |
-| Triggered by the deterministic policy, not by AI output | See Principle 1 |
-| Covered by limits and the kill switch, with a dry-run mode and tests | It can be stopped and checked |
+The current policy proposes only `hold_promotion`:
 
-### Tier A — auto-eligible (the whitelist)
+- `A3:composite-success`: a `composite-dependency-secret` incident with exactly
+  two correlated `attack-sim` scenario events, one malicious dependency and one
+  leaked secret, with at least one scenario status `success`.
+- `A3:untrusted-registry`: an `untrusted-registry-pull` incident with one image
+  pull event and a nonempty registry outside `docker.io` and `ghcr.io`.
 
-| ID | Action | Trigger (policy) | Effect | Undo | Credential |
-|---|---|---|---|---|---|
-| A1 | `preserve_evidence` | Every incident with severity ≥ `high` | Write the incident and its **raw** events to a local, append-only evidence store with a content hash in the action log | None needed — additive. Retention policy deletes, never the controller | Local file write, evidence directory only |
-| A2 | `notify_channel` | Every incident with severity ≥ `high`; at most one per incident | Send a fixed plain-text template to the operator's Telegram chat: pattern, severity, incident id, outcome counts | None needed — additive | Telegram bot token |
-| A3 | `hold_promotion` | `composite-dependency-secret` with ≥1 attack that **got through**, or `untrusted-registry-pull` | Set repository variable `BANTIS_PROMOTION_HOLD` so CI's `promote-latest` job skips: a possibly-compromised build can't become `:latest`. Running services are untouched | B3 (`lift_promotion_hold`), approval required — a hold never lifts itself | Fine-grained GitHub token, this repository only, *Variables: write* |
+Evidence IDs must exactly match correlated IDs without duplicates. Future-dated
+incidents produce no proposal. Action IDs are deterministic per incident; the
+one-hour execution window starts at incident creation, not synchronization.
+The default automatic rule is `A3:composite-success`; a registry proposal needs
+manual approval unless its exact rule is selected in automatic configuration.
 
-Notes:
-
-- **A1's raw events can contain secrets** (`tool_output_tail` from a real
-  gitleaks run). The evidence store therefore stays inside Bantis's
-  boundary: local disk, readable only by the operator, never sent to the
-  AI provider or the notification channel.
-- **A2's message is a fixed template filled from rule-based fields**
-  (`pattern`, `severity`, `incident_id`, counts). No event text and no AI
-  text goes into it: event fields can carry attacker-written content, and
-  a notification is not a place to render it. Sent as plain text, not
-  Markdown.
-- **A3's CI change is in place:** `promote-latest` runs only while
-  `vars.BANTIS_PROMOTION_HOLD` is empty; a `Promotion Held` job warns on
-  the run instead, and the notification reports `held`.
-- **A3 holds rather than reverts.** It stops the next promotion, which is
-  reversible and leaves production as it is. Reverting what is already
-  `:latest` is B1, a separate, approved decision. A hold that lifted
-  itself after a timeout would re-open the path for the build it was
-  protecting against, so lifting it is always a human's call.
-- **A3 is also a denial-of-service lever** for anyone who can create
-  incidents: forging one untrusted-registry event would freeze releases.
-  That is why A3 requires authenticated ingestion (gate G1), at most one
-  active hold, and why the hold is visible in every notification until
-  lifted.
-
-### Tier B — approval required
-
-| ID | Action | Proposed when | Effect | Parameters | Undo | Credential |
-|---|---|---|---|---|---|---|
-| B1 | `rollback_latest` | An A3 hold is active, or a composite incident with an attack that got through | Dispatch CI's existing `rollback` workflow: `:latest` → a previously promoted image | Target SHA chosen **by the controller** as the last image promoted before the incident's first event; the approver may pick another SHA only from the recorded promotion history | B1 again, to the SHA it replaced | GitHub token, *Actions: write*, used only to dispatch `ci.yml` |
-| B2 | `block_client_ip` | Range `http_request` events from one client IP correlated with an incident | Add a `deny` rule to the range's nginx config and reload | IP from the range's own nginx events — shown with a provenance warning while ingestion is unauthenticated | Remove the rule; every rule also carries an expiry (default 24h) | Write access to one generated include file in the range's nginx config, and a reload |
-| B3 | `lift_promotion_hold` | An operator asks | Unset `BANTIS_PROMOTION_HOLD` | — | A3 | Same as A3 |
-| B4 | `rollback_action` | An authenticated operator requests rollback of a recorded execution | Restore the saved target state using the original implementation's compensation | Executed action ID and audited snapshot hash | A new reviewed rollback of this compensation | Original action's scoped credential |
-
-B2 needs one change to the range: nginx's config is mounted read-only
-from `range/nginx/default.conf` today, so the deny rules would go in a
-separate, generated include file that the controller alone writes, and
-`default.conf` would include it. The controller never edits
-`default.conf` itself.
-
-Tier B is not "Tier A with a button". Each one can affect availability
-(B1, B2) or reopen a path (B3), which is exactly where a human has to
-decide.
-
-### Tier C — never automated, not offered
-
-| Action | Why not |
-|---|---|
-| Revoking or rotating credentials | Bantis holds no credentials for the range's systems, and shouldn't; rotation is the owner's process |
-| Deleting images, data, branches or logs | Irreversible, and destroys evidence |
-| Changing source code or CI workflow definitions | That is the supply chain under attack |
-| Stopping the range, its database, or host services | An outage Bantis would cause itself |
-| Firewall or host changes beyond the range's nginx | Outside Bantis's scope (ADR 0001) |
-| Anything a model writes in free text | Principle 2 |
-
-Adding to the catalog, or moving an action between tiers, needs its own
-reviewed decision (an ADR amendment), not a configuration change.
-
-## The approval flow
+## Proposal and approval lifecycle
 
 ### A proposal
 
-```json
-{
-  "action_id": "act_6f1c…",
-  "incident_id": "1c9a3f2e-…",
-  "type": "rollback_latest",
-  "params": {"target_sha": "3d07256", "replaces_sha": "9a41e0b"},
-  "policy_rule": "B1:composite-success",
-  "created_at": "2026-10-20T09:12:00Z",
-  "expires_at": "2026-10-20T10:12:00Z",
-  "required_approvals": 1,
-  "proposal_hash": "sha256 of the canonical JSON of every field above"
-}
+[Proposal and Approval](../response-controller/models.py) carry action and
+incident IDs, type, scalar parameters, policy rule, timezone-aware creation and
+expiry times, and approval count. `proposal_hash` is recomputed from canonical
+JSON of every proposal field; it is not a supplied authorization token.
+
+The CLI authenticates `approve`, `modify`, `dismiss`, and `rollback` using the
+current OS identity and `RESPONSE_APPROVER_SECRET_FILE`. This must be a nonempty,
+operator-owned regular file with no group or other permission bits; 0600 and
+0400 are documented examples. Secrets are prompted for, not passed as arguments.
+Reads, ordinary submission, automatic execution, and emergency stopping rely on
+trusted host access.
+
+Approval must match the action ID and at least 12 hash characters, fall inside
+the proposal's review window, and come from distinct approvers. The default
+window is 60 minutes. Multiple CLI approvals require distinct OS identities;
+a shared account does not provide two-person approval.
+
+```mermaid
+flowchart TD
+    P[pending] -->|partial approval| P
+    P -->|modify: fresh ID and approvals| N[new pending proposal]
+    P -->|original closed| M[modified]
+    P -->|dismiss| D[dismissed]
+    P -->|eligible live attempt| X[executing marker committed]
+    P -->|checks or dry run| C[closed without target mutation]
+    X --> S[succeeded]
+    X --> F[failed or invalidated]
 ```
 
-The approver is shown the proposal, its `proposal_hash`, the incident's
-rule-based facts, the AI Copilot's recorded analysis (labeled as AI
-output), the undo, and any provenance warning.
+`approved` and `undone` are not stored queue states. Executor outcomes are
+`refused`, `awaiting_approval`, `expired`, `invalidated`, `dry_run`, `succeeded`,
+and `failed`. Awaiting approval keeps a proposal pending. Expired proposals are
+filtered from `pending` and rejected on review without a background status
+rewrite. A dry run closes its proposal; a live attempt needs a new one.
 
-### States
+`modify` changes parameters only, retaining type, incident, rule, expiry, and
+approval count; replacements inherit no approvals. Rollback proposals cannot be
+modified. Context can be refreshed without changing the proposal or replaying a
+completed action. Execution checks current target preconditions; it does not
+re-fetch the incident to prove it is still valid at approval time.
 
-The local CLI implementation is documented in
-[`response-controller/README.md`](../response-controller/README.md#manual-review-approve--modify--dismiss).
-It persists proposals and authenticated Approve / Modify / Dismiss
-decisions in a local SQLite journal. `modify` closes the original as
-`modified` and creates a linked pending proposal with a new action ID,
-no inherited approvals and the original expiry. `dismiss` is the
-reason-required rejection transition below (stored as `dismissed`).
-Execution still runs through the existing executor. The journal now chains
-review and execution events with SHA-256, records executor and initiator
-identities and per-event UTC times, and supports verified JSON-lines export
-and checkpoint comparison through `audit` and `audit-verify`. Existing journal
-payloads receive a migration baseline without invented historical metadata.
-External anchoring (G2) and the other deployment gates remain required; see
-[the audit trail documentation](../response-controller/README.md#audit-trail).
+## Execution and concurrency
 
-```
-              ┌──────────── expired (no execution; can be re-proposed)
-              │
- proposed ──▶ pending ──▶ approved ──▶ executing ──▶ succeeded ──▶ (undone)
-              │              │              │
-              │              │              └──▶ failed  (post-check failed → tripwire)
-              │              └──▶ invalidated (kill switch engaged, or preconditions changed)
-              └──▶ rejected (reason required)
+The executor applies these steps in order:
 
- Tier A skips "pending": proposed ──▶ executing, unless the kill switch is at auto-off.
-```
+1. Record the request. Require a catalog type, implementation, explicit
+   enablement, and strictly validated parameters.
+2. Reject already attempted IDs and expired proposals. Reject any supplied
+   approval for a different proposal hash.
+3. Read the effective stop state. Require enough distinct approvals unless the
+   exact automatic scope applies and automatic execution is allowed. Partial
+   manual approval cannot fall back to automatic execution.
+4. Check current target preconditions and calculate the read-only plan.
+   Preconditions that fail or raise invalidate without acting.
+5. In dry run, record the plan and stop. Reads and journal writes still occur;
+   target mutations and automatic reservations do not.
+6. Reserve an automatic slot if needed. Commit `executing` before effects.
+7. Recheck the stop, capture and persist rollback state, then recheck the stop
+   and captured target state before executing reversible actions.
+8. Record execution, run the read-only post-check, and record verification and
+   the outcome. Execution or post-check failures trip execution off.
 
-### Rules
+The review flow holds a host file lock through execution. Journal appends and
+automatic reservations use SQLite write transactions. These serialize cooperating
+processes sharing a journal and lock file. Direct callers of `Executor` must
+provide equivalent serialization; the executor alone is not a distributed lock.
 
-1. **An approval binds to one exact proposal.** The approver confirms by
-   entering the first 12 characters of `proposal_hash`. The executor
-   recomputes the hash at execution time; any change to type, params,
-   incident or expiry means no execution. Approving X can only ever
-   execute X.
-2. **Approvals expire.** A proposal not approved within its window
-   (default 60 minutes; 30 for B2) expires. A stale approval doesn't sit
-   waiting for the moment it becomes wrong.
-3. **Approvers authenticate separately.** v1 approval is a local CLI on
-   the host (`responder approve <action_id> <hash-prefix>`), requiring
-   the operator's host access plus an approver secret that is not the
-   Copilot's API token and not any executor credential. An HTTP approval
-   endpoint comes later, only behind the dashboard's authentication, TLS
-   and CSRF protection.
-4. **Rejections need a reason** and are recorded. They are the most
-   useful signal for tuning the policy.
-5. **Preconditions are re-checked at execution.** The incident still
-   exists, the rollback target still exists in the promotion history,
-   the hold is still active, and the kill switch is clear. Otherwise the
-   proposal is `invalidated`.
-6. **Execute once.** `action_id` is the idempotency key. A retry after a
-   crash checks the action log and the target's actual state first.
-7. **Verify the effect.** After acting, the controller checks the
-   post-condition (the variable is set; `:latest` resolves to the target
-   digest; nginx serves the deny rule). A failed check marks the action
-   `failed` and trips the kill switch.
-8. **Two-person rule, ready but off.** `required_approvals` is a field
-   from day one. The threat model has a single operator in v1, so it's 1.
-   With more operators it becomes 2 for B1, with approvers required to
-   differ.
-9. **Everything is recorded** in the action log: proposal, every state
-   change, who approved or rejected and why, the executor's request and
-   response, the post-check, the undo. It uses the decision log's
-   hash-chain design, with the latest hash anchored outside the
-   controller's write access (gate G2).
+An `executing` marker prevents replay even after a crash before the effect.
+This is **at-most-once attempt protection**, not an exactly-once remote
+transaction. A remote change may happen before an error or failed audit write.
+Inspect incomplete attempts and their targets rather than retrying the original
+ID. A pre-effect audit failure blocks the effect; a post-effect failure reports
+failure and trips the switch without automatically undoing the effect.
 
-## Limits
+## Automatic scope and limits
 
-| Limit | Default | When exceeded |
-|---|---|---|
-| Tier-A executions per hour, all types | 5 | Tripwire: kill switch to `auto-off` |
-| Active promotion holds | 1 | No new A3; the existing hold is re-notified |
-| A2 notifications per incident | 1 | Not sent |
-| A2 notifications per hour | 10 | One summary message, then silence until the hour ends |
-| Pending proposals | 20 | New proposals are recorded as `suppressed`, and the operator is notified once |
-| B1 rollbacks per 24h | 2 | Not proposed; needs a manual workflow run |
-
-The limits are counted from the action log, so they hold across
-restarts. A burst is a signal in itself: the response to "too many
-actions" is to stop, not to keep going more slowly.
-
-## The kill switch
-
-### Levels
-
-| Level | Effect | Typical use |
-|---|---|---|
-| `clear` | Normal operation | — |
-| `auto-off` | No Tier-A auto-execution. Tier-A actions become approval-required; approved actions still run | The policy is misfiring |
-| `execution-off` | Nothing executes. Proposals are still recorded. **Approvals already granted are invalidated** and must be re-approved after resuming, so a backlog can't fire all at once | Something is wrong with the controller or its inputs |
-| `ai-off` (independent) | The AI Copilot makes no model calls. Incidents are delivered without analysis, and follow-ups return `503` — its existing fallback path | Provider compromise, cost runaway, injection campaign |
-
-`ai-off` can be combined with either execution level.
-
-### Mechanism
-
-- **State lives in two files** in `$BANTIS_STATE_DIR`. `kill-switch` is
-  the operator's: the controller and the Copilot can read it, not write
-  it. `kill-switch.tripped` is the only file the controller can write,
-  for its tripwires, and it can only add restriction. The effective
-  state is the more restrictive of the two. Each holds the level, who
-  set it, when, and why.
-- **Fail closed.** A missing state directory or operator file, a
-  permission error, an unparseable file, or an unknown level are all
-  treated as `execution-off` + `ai-off`. Only a readable file saying `clear` allows
-  execution.
-- **Checked at the last moment.** The executor reads the switch
-  immediately before every external call, not once per poll. A
-  multi-step action re-checks between steps. A step already in flight
-  finishes (each step is single and idempotent); no new step starts.
-- **The Copilot checks it** before every model call (`ai-off`).
-
-### Engaging and resuming
-
-| | Engage | Resume |
-|---|---|---|
-| Who | Anyone with host access, or an automatic tripwire | An approver |
-| How | `responder kill --level execution-off --reason "…"` — or, if everything else is broken, writing the level into the file by hand (documented) | `responder resume --reason "…"` plus the approver secret |
-| Approval | None — stopping must never wait | Required, and recorded |
-| Works when | The controller is down, the network is down, the log is unreachable | The controller and its action log are healthy |
-
-Resuming takes the switch to `clear`, removes `kill-switch.tripped`,
-**and** invalidates every approval granted before or during the stop.
-
-### Automatic tripwires
-
-These can engage the switch, never clear it:
-
-| Tripwire | Level |
+| Implemented control | Behavior |
 |---|---|
-| Tier-A executions over the hourly limit | `auto-off` |
-| A post-condition check fails, or an undo fails | `execution-off` |
-| `verify` fails on the action log or the decision log | `execution-off` |
-| The action log can't be written ("can't record, so don't act") | `execution-off` |
-| The AI token budget is exhausted twice in one day | `ai-off` |
+| Enabled actions | Empty by default; unknown names fail configuration |
+| Automatic action | Off by default; only `hold_promotion` is accepted |
+| Scope | Exact configured repository, policy rule, and one required approval |
+| Rate | Default 5 attempts per rolling hour; configurable from 1 to 5 |
+| Identity | One automatic reservation per action or incident across recorded history |
+| Exhausted rate | Trip `auto-off` and require approval |
+| Existing hold | Keep it; a new hold normally invalidates rather than replacing it |
 
-Every engagement, manual or automatic, sends one A2-style notification
-with the level and reason. That notification bypasses the A2 hourly
-limit, but not the kill switch for anything else.
+Reservations count attempts, including crashes and failed effects, not just
+successes. Future timestamps count against the budget to resist host clock
+rollback. Preconditions and dry runs consume no slot. These local-journal
+limits do not impose cross-host quotas or limits on manually approved actions.
 
-### Drills
+The previously proposed limits of 20 pending proposals, 10 notifications per
+hour, one notification per incident, and two image rollbacks per day are roadmap
+requirements, not enforced controls. Notification summaries, evidence retention,
+promotion-history selection, IP expiry, and action-specific review windows
+also depend on unimplemented actions.
 
-A kill switch that has never been pulled is a hypothesis. The
-controller's test suite must prove, at minimum, that:
+## Rollback
 
-- each level blocks what it should, with a pending action ready to run;
-- an unreadable or garbled state file blocks everything;
-- resuming invalidates earlier approvals;
-- a tripwire engages the switch but can't clear it.
+A rollback is a compensating proposal with its own ID, hash, expiry, approvals,
+execution, and verification. An authenticated request supplies the executed
+proposal's hash prefix and a reason. The new proposal binds to the original
+action and the entry hash of its pre-execution snapshot. `show` includes saved
+state for review. It retains the original approval count and always requires
+fresh approval, including when undoing an automatic hold.
 
-An operator drill (engage, confirm nothing runs, resume) is part of
-enabling any action for the first time.
+Undoing a hold restores the previous absence or value; undoing a lift restores
+the exact removed value. Changed API targets or unrelated current values block
+rollback. An already restored target succeeds without writing. Checks repeat
+after snapshot capture and before execution, but GitHub variable operations do
+not offer a conditional delete: external writers still need coordination.
 
-## Gates before anything executes
+Repeated requests reuse a pending rollback. Once a rollback reaches `executing`,
+another request cannot replay it. Dismissed, expired, and dry-run proposals can
+be requested again. A completed rollback can itself be rolled back after review.
+Expired originals and partial failures with saved state remain eligible.
+Legacy executions without snapshots require manual recovery. Restoring a hold
+cannot undo downstream releases promoted while it was absent. Future actions
+need tested snapshot, prepared-execution, and compensation hooks.
 
-ADR 0006 can be accepted as a design before these exist. No action is
-enabled until all of them do:
+## Audit journal
 
-| Gate | Why |
+`reviews.sqlite3` stores proposals, approvals, and ordered events. Events include
+proposal identity and hash, executor and initiator identities, per-event UTC
+times, attempt IDs, approvals, plans, structured outcomes, verification, and
+rollback links. Reversible live attempts add `rollback_prepared` before writing.
+A crash can leave an incomplete attempt.
+
+```text
+entry_hash = SHA256(sequence + "\n" + previous_hash + "\n" + exact_json_payload)
+```
+
+Appends verify the event chain inside the write transaction. History and audit
+exports also verify it. `audit-verify --expected-head` compares the current head
+with a separately retained checkpoint. Migration baselines legacy events; it
+does not invent historical identities or authenticity.
+
+The chain is neither encryption nor a signature. Local verification alone
+cannot prevent an administrator from rebuilding it, replacing the journal, or
+deleting a valid tail. `verify()` does not independently hash-chain proposal and
+approval tables. Protect the entire database and state directory. Independent
+checkpoint retention and external anchoring remain required by G2.
+
+## Kill switch and recovery
+
+| Effective state | Implemented effect |
 |---|---|
-| **G1 — authenticated ingestion in detection-engine** | Every trigger is an incident. While anyone can `POST /events`, anyone can trigger A3 (freezing releases) or flood A1/A2 |
-| **G2 — anchored action log** | Execution needs an audit trail that the executor itself can't truncate or rewrite: the latest hash is kept where the controller can't write |
-| **G3 — separate process, OS user and per-action credentials** | The component holding the keys must not be the one reading model output; each token covers one action type |
-| **G4 — kill switch implemented and drilled** | It must exist before the first thing it is meant to stop |
-| **G5 — every action ships disabled** | Each action is enabled individually, by configuration, after its own dry run |
+| `clear` | Configured approval and automatic scope rules apply |
+| `auto-off` | Automatic execution stops; approved actions can still execute |
+| `execution-off` | No target mutations; proposals can still be queued |
+| Independent `ai_off: true` | The Copilot's model-call path stops; controller execution still follows its execution level |
 
-## Rollout
+`kill-switch` contains the operator stop and `kill-switch.tripped` contains
+tripwires. The stronger level wins; AI-off flags are combined. Missing or corrupt
+operator state, or an unreadable or corrupt existing tripwire, fails closed to
+execution off and AI off. An absent tripwire is normal. Writers use atomic file
+replacement and a directory lock; their APIs cannot lower an existing stop.
 
-| Phase | Enables | Exit criterion |
-|---|---|---|
-| 0 (now) | Nothing. This design | ADR 0006 reviewed |
-| 1 | Kill switch, action log, approval flow; A1 and A2 auto | G1–G4 met; switch drills pass; two weeks without a false notification |
-| 2 | A3 **approval-only**, then auto | A3 proposals in phase 2a approved as proposed with no rejections for false positives |
-| 3 | B1, B2, B3 | Phase 2 stable; rollback rehearsed in staging |
+Guards recheck before effectful steps, not every read-only request. A remote call
+already in flight may finish. `python3 cli.py emergency-stop` sets execution off
+and AI off without an approver secret, independently of invalid action settings.
+Stopping precedes its audit attempt: a nonzero exit can mean the stop succeeded
+but auditing failed. A writable state directory is still required. If even the
+tripwire cannot be persisted, a critical log cannot guarantee a durable stop.
 
-Every phase starts in dry-run mode: the controller records what it
-would have done, and nothing executes until an operator has compared
-that record with what should have happened.
+There is **no authenticated `resume` command yet**. Manual recovery is described
+in the component guide. A stop does not globally invalidate stored approvals;
+pending partial approvals can remain. Inspect targets and incomplete attempts,
+review or dismiss pending approvals, and create fresh proposals as needed before
+restoring execution. Authenticated resume with automatic approval invalidation
+remains planned.
 
-## What this design does not do
+Implemented tripwires cover automatic rate exhaustion, execution and post-check
+failures, audit write/integrity failures on the execution path, and a corrupt
+Copilot decision log during `sync`. Token-budget-based AI stops and engagement
+notifications are planned, not controller guarantees.
 
-- **It doesn't make the AI more trusted.** The AI's role is unchanged;
-  it explains, and is shown to the approver as AI output.
-- **It doesn't remove the human from containment that costs
-  availability.** Only additive or holding actions are ever automatic.
-- **It doesn't defend against a compromised operator or host.** Someone
-  with host access can approve, resume or edit configuration; the action
-  log makes that visible, not impossible.
-- **It doesn't cover the AI provider's own failures** beyond `ai-off`.
+## Gates before live deployment
+
+| Gate | Current position and remaining work |
+|---|---|
+| G1: authenticated event ingestion | Outstanding; forged schema-valid events can cause holds when execution is enabled |
+| G2: externally anchored audit | Local chain and checkpoint comparison exist; independent anchoring and retention remain |
+| G3: process, OS, and capability separation | Component separation exists; provision accounts, permissions, and scoped repository credentials at deployment |
+| G4: kill switch implemented and drilled | Automated tests exist; drill the actual deployment before enabling actions |
+| G5: disabled by default | Implemented; per-action enablement and dry run remain operator decisions |
+
+The proposed rollout starts with reviewed documentation and dry runs, then
+manual holds, then scoped automatic holds after the gates and deployment drill.
+Catalog-only actions need implementation, tests, credential review, and staging
+rehearsal. Passing local tests does not establish that a deployment met the gates.
