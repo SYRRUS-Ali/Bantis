@@ -26,7 +26,8 @@ names, separate from the AI Copilot, as designed in
 - **A three-tier catalog.** Tier A, auto-eligible: `preserve_evidence`,
   `notify_channel`, `hold_promotion`. These are purely additive or
   hold-only, and reversible. Tier B, approval required:
-  `rollback_latest`, `block_client_ip`, `lift_promotion_hold`. Tier C is
+  `rollback_latest`, `block_client_ip`, `lift_promotion_hold`,
+  `rollback_action` (compensation of a recorded execution). Tier C is
   never offered: credentials, deletion, code, stopping services, host
   changes.
 - **Approval binds to one exact proposal** (by hash), expires, is given
@@ -44,6 +45,26 @@ names, separate from the AI Copilot, as designed in
 
 ADR 0004 remains the default and stays in force for the AI Copilot,
 whose no-capability guard test is unchanged.
+
+### Amendment: rollback of recorded executions
+
+`rollback_action` is tier B and disabled by default. An authenticated operator
+queues it against the hash of an executed proposal, supplies a reason, and then
+approves the new proposal through the existing review flow. It retains the
+original approval count and always requires fresh approval, even when undoing
+an automatic hold. The snapshot is committed to the hash-chained journal before
+the original effect; the new proposal binds to that snapshot's entry hash.
+
+Each reversible implementation provides a read-only snapshot and a tested
+compensation. The implemented promotion hold and release restore the exact
+previous value or absence on the recorded repository API target. State drift
+blocks compensation. Dry run, the kill switch, verification and audit failures
+have the same behavior as other actions. A failed or interrupted attempt with a
+saved snapshot can be reviewed for rollback; an execution without a snapshot
+requires manual recovery. Purely additive actions remain irreversible.
+
+This operation restores target state. It cannot cancel a deployment or other
+downstream operation that already happened while promotions were allowed.
 
 ## Consequences
 - Containment that preserves, notifies or holds can happen without

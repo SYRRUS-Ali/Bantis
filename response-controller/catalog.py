@@ -15,6 +15,7 @@ CATALOG: dict[str, Tier] = {
     "rollback_latest": Tier.APPROVAL,
     "block_client_ip": Tier.APPROVAL,
     "lift_promotion_hold": Tier.APPROVAL,
+    "rollback_action": Tier.APPROVAL,
 }
 
 # Each action's undo, where it has one. Purely additive actions have none.
@@ -25,6 +26,7 @@ UNDO: dict[str, str | None] = {
     "rollback_latest": "rollback_latest",
     "block_client_ip": None,  # rules carry an expiry; removal is part of the action's own design
     "lift_promotion_hold": "hold_promotion",
+    "rollback_action": "rollback_action",
 }
 
 ADDITIVE = frozenset({"preserve_evidence", "notify_channel"})

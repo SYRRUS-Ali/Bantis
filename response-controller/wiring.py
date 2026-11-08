@@ -16,9 +16,13 @@ def promotion_client(env: dict[str, str] | None = None) -> GitHubVariables | Non
     return GitHubVariables(repo, token, env.get("RESPONSE_GITHUB_API_URL") or DEFAULT_API_URL)
 
 
-def build_registry(env: dict[str, str] | None = None) -> ActionRegistry:
+def build_registry(env: dict[str, str] | None = None, *, store=None) -> ActionRegistry:
     registry = ActionRegistry()
     client = promotion_client(env)
     registry.register(HoldPromotion(client))
     registry.register(LiftPromotionHold(client))
+    if store is not None:
+        from rollback import RollbackAction
+
+        registry.register(RollbackAction(registry, store))
     return registry

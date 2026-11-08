@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--execute", action="store_true", help="Also attempt pending proposals through the bounded automatic runner.")
     show = commands.add_parser("show", help="Show a proposal, its hash, status and decision history.")
     show.add_argument("action_id")
+    rollback = commands.add_parser("rollback", help="Queue rollback of an executed action; fresh approval is required.")
+    rollback.add_argument("action_id")
+    rollback.add_argument("hash_prefix", help="At least the first 12 characters of the executed proposal hash.")
+    rollback.add_argument("--reason", required=True)
     for decision in ("approve", "modify", "dismiss"):
         command = commands.add_parser(decision, help=f"{decision.capitalize()} one exact proposal (operator authentication required).")
         command.add_argument("action_id")
@@ -75,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "audit", "audit-verify", "auto-run", "sync"}:
+    if args.command in {"propose", "pending", "show", "approve", "modify", "dismiss", "rollback", "audit", "audit-verify", "auto-run", "sync"}:
         return _review(args, config)
 
     if args.command in {"kill", "emergency-stop"}:
@@ -139,9 +143,9 @@ def _review(args, config) -> int:
     from wiring import build_registry
 
     try:
-        actor = _authenticate() if args.command in {"approve", "modify", "dismiss"} else None
-        registry = build_registry()
+        actor = _authenticate() if args.command in {"approve", "modify", "dismiss", "rollback"} else None
         with closing(ReviewStore(config.state_dir / "reviews.sqlite3")) as store:
+            registry = build_registry(store=store)
             flow = ApprovalFlow(store, Executor(registry, config, store), registry)
             if args.command == "audit":
                 for entry in store.audit(action_id=args.action_id, actor=args.actor):
@@ -178,6 +182,10 @@ def _review(args, config) -> int:
                 outcome = flow.approve(args.action_id, args.hash_prefix, actor)
                 print(outcome.model_dump_json(indent=2))
                 return 0 if outcome.status in {Status.SUCCEEDED, Status.DRY_RUN, Status.AWAITING_APPROVAL} else 1
+            elif args.command == "rollback":
+                proposal = flow.rollback(args.action_id, args.hash_prefix, actor, args.reason)
+                _print_proposal(proposal, "pending")
+                print("Rollback queued; fresh approval required.")
             elif args.command == "auto-run":
                 outcome = flow.run_automatic(args.action_id)
                 print(outcome.model_dump_json(indent=2))

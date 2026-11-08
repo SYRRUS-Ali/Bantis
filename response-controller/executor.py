@@ -187,7 +187,11 @@ class Executor:
         guard = _SwitchGuard(self._config, needs_auto)
         try:
             guard.check()
-            result = action.execute(proposal, params, guard)
+            rollback_state = action.prepare_rollback(proposal, params)
+            if rollback_state is not None and not record("rollback_prepared", {"state": rollback_state.model_dump(mode="json")}):
+                return done(Status.REFUSED, "could not record rollback state; not acting", plan=plan)
+            guard.check()
+            result = action.execute_prepared(proposal, params, guard, rollback_state)
         except Halted as exc:
             return done(Status.INVALIDATED, f"halted by the kill switch: {exc}", plan=plan)
         except Exception as exc:

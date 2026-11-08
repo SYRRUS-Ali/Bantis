@@ -17,6 +17,8 @@ An opt-in automatic runner supports only `hold_promotion`, pinned to one
 repository and policy rule, with durable attempt limits.
 The `sync` bridge now builds proposals from detection incidents and joins
 the matching Copilot decision-log recommendation as review context.
+Executed holds and hold releases can be rolled back through a separate,
+authenticated proposal that restores their saved prior state.
 
 **What doesn't:** external anchoring of the action log (G2), the approver-authenticated `resume`
 command, and the other four actions. Nothing is enabled by
@@ -29,7 +31,7 @@ could trigger a quarantine and freeze releases.
 
 ```
 response-controller/
-├── catalog.py          # the six catalog actions and their tiers (A: auto-eligible, B: approval), undo pairs
+├── catalog.py          # catalog actions and their tiers (A: auto-eligible, B: approval), undo pairs
 ├── models.py           # Proposal (immutable, hashed), Approval (bound to a hash prefix), Outcome, Status
 ├── actions/base.py     # Action: the interface every action implements; ActionParams; StepGuard
 ├── registry.py         # catalog type → implementation; refuses anything outside the catalog
@@ -40,6 +42,7 @@ response-controller/
 ├── recommendations.py  # read-only, verified decision-log snapshot for review context
 ├── bridge.py           # idempotent proposal ingestion and optional guarded execution
 ├── approval_flow.py    # persistent SQLite review queue and serialized Approve / Modify / Dismiss decisions
+├── rollback.py         # audited rollback snapshots and approval-only compensating actions
 ├── actions/promotion_hold.py  # A3 hold_promotion (the CI quarantine) and B3 lift_promotion_hold
 ├── github_client.py    # repository-variables API only; https only; the token never reaches a message
 ├── wiring.py           # builds the registry, one credential per capability
@@ -60,6 +63,9 @@ Every action is a subclass of `actions.base.Action`:
 | `type` | A catalog name. The registry refuses anything else. |
 | `params_model` | A subclass of `ActionParams`: unknown keys rejected, no type coercion, immutable. |
 | `automatic_scope` | The implementation's fixed target; defaults to no automatic support. |
+| `prepare_rollback(proposal, params)` | Read-only prior state, persisted before execution; `None` for irreversible actions. |
+| `reversal(proposal, state)` | Build a compensating action from the audited prior state; reject unsupported rollback. |
+| `execute_prepared(proposal, params, guard, state)` | Execute with the durable snapshot; reversible implementations recheck the captured target state before acting. |
 | `preconditions(proposal, params)` | Read-only. Why it can't run now; empty when it can. |
 | `plan(proposal, params)` | Read-only. One line saying what `execute` would do — the dry-run record and what an approver reads. |
 | `execute(proposal, params, guard)` | Does it. Idempotent per `action_id`. Calls `guard.check()` before every step with an external effect. |
@@ -85,7 +91,7 @@ before any effectful method is called:
 11. Automatic attempts reserve a durable slot, then `executing` is
     recorded before any effect. A failed write prevents execution and
     trips the switch.
-12. Execution, with the switch re-read right before the first step and
+12. Persist rollback state for reversible actions, then execute, with the switch re-read right before the first step and
     before every step after it.
 13. Verification. A failed or raising post-check, or an action that
     raises, trips the switch to `execution-off`.
@@ -146,6 +152,50 @@ enabled actions, dry-run mode, kill switch and current hold first.
 All of it is tested against a local stand-in for GitHub's API
 (`tests/fake_github.py`), with the real HTTP client, so no test touches
 a real repository.
+
+## Rollback of an executed action
+
+From `response-controller/`, enable `rollback_action` alongside the actions you
+already use. It remains disabled by default:
+
+```bash
+export RESPONSE_ENABLED_ACTIONS=hold_promotion,lift_promotion_hold,rollback_action
+python3 cli.py show ORIGINAL_ACTION_ID
+python3 cli.py rollback ORIGINAL_ACTION_ID ORIGINAL_HASH_PREFIX --reason "False positive confirmed"
+python3 cli.py show ROLLBACK_ACTION_ID
+python3 cli.py approve ROLLBACK_ACTION_ID ROLLBACK_HASH_PREFIX
+```
+
+Use the IDs and hash prefixes printed by the commands; prefixes must contain
+at least 12 characters. Requesting rollback and approving it both authenticate
+with `RESPONSE_APPROVER_SECRET_FILE`. Requesting only queues the proposal and
+never changes the target. Approval follows the configured dry-run mode and kill
+switch. The rollback keeps the original approval count and cannot run automatically.
+
+`show ROLLBACK_ACTION_ID` includes the captured state in its proposal history
+so the operator can inspect the exact target and previous value before approval.
+The journal saves the configured API target and exact previous hold value
+before the original external effect. Rollback of `hold_promotion` removes that
+hold; rollback of `lift_promotion_hold` restores the value it removed. A target
+already in its prior state succeeds without writing. A changed repository API
+target or an unrelated current hold blocks rollback. GitHub's variable API has
+no conditional delete: the controller checks immediately before writing, but
+cannot atomically exclude a concurrent external writer. Coordinate other writers
+to this variable during rollback.
+
+Repeated requests return the same pending rollback. An attempted rollback cannot
+be replayed after a restart; inspect failures before manual recovery. A dismissed,
+expired or dry-run proposal can be requested again. Rollback proposals cannot be
+modified: dismiss and request a new review instead. A completed rollback can
+itself be rolled back through the same flow.
+
+The original proposal can have expired: rollback gets a fresh review window.
+Failed or interrupted executions with a saved snapshot are also eligible, since
+they may have changed the target. Legacy executions without snapshots and
+irreversible actions require manual recovery. Future action implementations must
+provide snapshot and compensation hooks to support this command. Restoring a
+hold cannot undo releases already promoted while it was absent. The audit
+history retains both executions, their linkage, reason, operators and results.
 
 ## Limited automatic execution
 
@@ -541,7 +591,7 @@ configuration before clearing the switch.
 | `RESPONSE_AUTO_REPO` | empty | Required for automatic mode; exact `owner/name`, matching `RESPONSE_GITHUB_REPO` |
 | `RESPONSE_AUTO_POLICY_RULE` | `A3:composite-success` | Exact policy rule eligible for automatic execution |
 | `RESPONSE_AUTO_MAX_PER_HOUR` | `5` | Automatic attempt cap per rolling hour; integer from 1 to 5 |
-| `RESPONSE_APPROVER_SECRET_FILE` | none | Operator-owned private file; required by `approve`, `modify`, `dismiss` |
+| `RESPONSE_APPROVER_SECRET_FILE` | none | Operator-owned private file; required by `approve`, `modify`, `dismiss`, `rollback` |
 | `RESPONSE_GITHUB_REPO` | none | `owner/name` the promotion hold applies to |
 | `RESPONSE_GITHUB_TOKEN_PROMOTION` | none | Fine-grained token: this repo, *Variables: write* only |
 | `RESPONSE_GITHUB_API_URL` | `https://api.github.com` | https only (plain http only to loopback, for tests) |

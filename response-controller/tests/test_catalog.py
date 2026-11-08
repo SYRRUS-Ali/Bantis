@@ -11,6 +11,7 @@ def test_the_catalog_is_exactly_adr_0006s():
         "rollback_latest": Tier.APPROVAL,
         "block_client_ip": Tier.APPROVAL,
         "lift_promotion_hold": Tier.APPROVAL,
+        "rollback_action": Tier.APPROVAL,
     }
 
 

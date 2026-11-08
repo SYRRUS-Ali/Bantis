@@ -45,6 +45,19 @@ class Action(ABC):
     def parse_params(self, proposal: Proposal) -> ActionParams:
         return self.params_model.model_validate(proposal.params)
 
+    def prepare_rollback(self, proposal: Proposal, params: ActionParams) -> ActionResult | None:
+        """Read-only state to persist before execution; None means irreversible."""
+        return None
+
+    def reversal(self, proposal: Proposal, state: ActionResult) -> Action:
+        """Build a compensating action from the recorded state, without effects."""
+        raise ValueError(f"{self.type!r} does not support rollback")
+
+    def execute_prepared(self, proposal: Proposal, params: ActionParams, guard: StepGuard,
+                         state: ActionResult | None) -> ActionResult:
+        """Execute with the durable snapshot; implementations can reject intervening drift."""
+        return self.execute(proposal, params, guard)
+
     @abstractmethod
     def preconditions(self, proposal: Proposal, params: ActionParams) -> list[str]:
         """Why the action can't run right now; empty when it can. Read-only."""

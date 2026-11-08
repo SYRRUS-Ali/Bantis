@@ -47,6 +47,12 @@ class GitHubVariables:
     def __repr__(self) -> str:  # never let the token reach a log line
         return f"GitHubVariables(repo={self.repo!r})"
 
+    @property
+    def target(self) -> str:
+        """Credential-free identity of the configured repository API target."""
+        scheme = "https" if self._https else "http"
+        return f"{scheme}://{self._host}:{self._port}{self._base}/repos/{self.repo}"
+
     def _request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | None]:
         connection_cls = http.client.HTTPSConnection if self._https else http.client.HTTPConnection
         connection = connection_cls(self._host, self._port, timeout=self._timeout)

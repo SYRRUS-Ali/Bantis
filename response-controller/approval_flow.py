@@ -19,7 +19,14 @@ from pathlib import Path
 
 from automatic import check_reservation
 from executor import Executor
-from models import HASH_PREFIX_LENGTH, Approval, Outcome, Proposal, Status
+from models import (
+    DEFAULT_PROPOSAL_TTL,
+    HASH_PREFIX_LENGTH,
+    Approval,
+    Outcome,
+    Proposal,
+    Status,
+)
 from registry import ActionRegistry
 
 
@@ -289,6 +296,8 @@ class ApprovalFlow:
         with self.store.locked(), self.store.transaction():
             now = now or datetime.now(UTC)
             original = self._pending(action_id, prefix, now)
+            if original.type == "rollback_action":
+                raise ReviewError("rollback proposals cannot be modified; dismiss and request again")
             fields = original.model_dump(exclude={"action_id", "params", "created_at"})
             replacement = Proposal(**fields, params=params, created_at=now)
             self._validate(replacement)
@@ -312,6 +321,41 @@ class ApprovalFlow:
             proposal = self._pending(action_id, prefix, now)
             self.store._status(action_id, "dismissed")
             self._event(proposal, "dismissed", actor, now, reason=reason)
+
+    def rollback(self, action_id: str, prefix: str, actor: str, reason: str,
+                 *, now: datetime | None = None) -> Proposal:
+        """Queue a compensating proposal; execution always requires fresh approval."""
+        from rollback import rollback_source
+
+        self._reason(actor, reason)
+        with self.store.locked(), self.store.transaction():
+            now = now or datetime.now(UTC)
+            original, state, snapshot_hash = rollback_source(self.store, action_id)
+            if not HASH_PREFIX_LENGTH <= len(prefix) <= 64 or not original.proposal_hash.startswith(prefix):
+                raise ReviewError("proposal hash does not match the executed action")
+            action = self.registry.get(original.type)
+            if action is None:
+                raise ReviewError("the original action implementation is unavailable")
+            action.reversal(original, state)
+            for entry in self.store.history(action_id):
+                if entry["event"] != "rollback_requested":
+                    continue
+                previous, status = self.store.get(entry["rollback_id"])
+                if any(e["event"] == "executing" for e in self.store.history(previous.action_id)):
+                    raise ReviewError("rollback was already attempted; inspect its outcome before manual recovery")
+                if status == "pending" and not previous.is_expired(now):
+                    return previous
+            proposal = Proposal(incident_id=original.incident_id, type="rollback_action",
+                                params={"original_action_id": action_id, "snapshot_hash": snapshot_hash},
+                                policy_rule="B:operator-rollback", required_approvals=original.required_approvals,
+                                created_at=now, expires_at=now + DEFAULT_PROPOSAL_TTL)
+            self._validate(proposal)
+            self.store._insert(proposal)
+            self._event(original, "rollback_requested", actor, now, rollback_id=proposal.action_id, reason=reason)
+            self._event(proposal, "proposed", actor, now, rollback_of=action_id, reason=reason,
+                        rollback_state=state.model_dump(mode="json"),
+                        proposal=proposal.model_dump(mode="json"))
+            return proposal
 
     @staticmethod
     def _reason(actor: str, reason: str) -> None:

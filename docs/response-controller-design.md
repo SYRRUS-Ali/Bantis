@@ -135,6 +135,7 @@ Notes:
 | B1 | `rollback_latest` | An A3 hold is active, or a composite incident with an attack that got through | Dispatch CI's existing `rollback` workflow: `:latest` → a previously promoted image | Target SHA chosen **by the controller** as the last image promoted before the incident's first event; the approver may pick another SHA only from the recorded promotion history | B1 again, to the SHA it replaced | GitHub token, *Actions: write*, used only to dispatch `ci.yml` |
 | B2 | `block_client_ip` | Range `http_request` events from one client IP correlated with an incident | Add a `deny` rule to the range's nginx config and reload | IP from the range's own nginx events — shown with a provenance warning while ingestion is unauthenticated | Remove the rule; every rule also carries an expiry (default 24h) | Write access to one generated include file in the range's nginx config, and a reload |
 | B3 | `lift_promotion_hold` | An operator asks | Unset `BANTIS_PROMOTION_HOLD` | — | A3 | Same as A3 |
+| B4 | `rollback_action` | An authenticated operator requests rollback of a recorded execution | Restore the saved target state using the original implementation's compensation | Executed action ID and audited snapshot hash | A new reviewed rollback of this compensation | Original action's scoped credential |
 
 B2 needs one change to the range: nginx's config is mounted read-only
 from `range/nginx/default.conf` today, so the deny rules would go in a

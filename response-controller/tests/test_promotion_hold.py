@@ -60,7 +60,7 @@ def test_quarantine_sets_the_hold_and_verifies_it(clear, github, client):
     assert outcome.status == Status.SUCCEEDED, outcome.reasons
     assert github.variables == {HOLD_VARIABLE: hold_value(p)}
     assert github.variables[HOLD_VARIABLE] == f"{HOLD_MARKER} incident=inc-1 action={p.action_id}"
-    assert [e["event"] for e in recorder.entries] == ["requested", "automatic_reserved", "executing", "executed", "verification_started", "verified", "outcome"]
+    assert [e["event"] for e in recorder.entries] == ["requested", "automatic_reserved", "executing", "rollback_prepared", "executed", "verification_started", "verified", "outcome"]
 
 
 def test_quarantine_runs_without_approval_but_lifting_it_needs_one(clear, github, client):
