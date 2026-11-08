@@ -283,6 +283,18 @@ Full architecture and the recommend-only principle in detail:
   a successful one to a misleading recommendation a person reviews.
 - **Explanation quality is not yet scored** against real model output.
 
+## Response Controller documentation
+
+The controller implements local review, scoped promotion holds, and authenticated
+rollback. Actions are disabled by default and dry run is the default. ADR 0006
+remains Proposed; live deployment still depends on its security gates.
+
+- [Design and implemented behavior](docs/response-controller-design.md): trust
+  boundaries, catalog, policy, approvals, execution, rollback, and remaining work.
+- [Security guarantees and evidence](docs/response-controller-security.md):
+  controls, test references, failure handling, assumptions, and operator checks.
+- [Configuration and CLI guide](response-controller/README.md).
+
 ## License
 
 MIT

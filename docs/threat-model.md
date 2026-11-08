@@ -32,14 +32,37 @@ network intrusion detection system in v1.
   Bantis only sees what its instrumented services report.
 
 ## Trust Boundaries
-- **Operator ⟷ Bantis**: trusted, authenticated via the admin account
-  created in the setup wizard.
+- **Operator ⟷ Bantis**: trusted host access is the current controller
+  boundary. CLI approval, modification, dismissal, and rollback requests also
+  require the operator's private approver secret and use the current OS identity.
+  A setup-wizard admin account is not an implemented controller authentication
+  mechanism.
 - **Bantis ⟷ AI provider**: semi-trusted. Only correlated incident data is
   sent for analysis, never raw secrets or credentials — the exact
   allowlisted shape is fixed in
   [`docs/ai-copilot-contract.md`](ai-copilot-contract.md).
 - **Bantis ⟷ Range**: the range is intentionally the vulnerable surface being
   monitored, not part of Bantis's own trust boundary.
+
+## Response Controller
+
+The [controller design](response-controller-design.md) and
+[security guarantees](response-controller-security.md) describe the current
+action path, enforcement points, tests, and deployment gates.
+
+The controller can automatically hold promotions only within an explicitly
+enabled repository and policy scope. Model output supplies untrusted review
+context, not executable policy input. Hold releases and rollback require fresh
+approval. Event ingestion is still unauthenticated, so forged incidents can
+freeze releases when execution is enabled; deterministic policy does not prove
+event provenance.
+
+The local event hash chain detects inconsistent history, but cannot stop a
+privileged host writer from replacing or rebuilding it. Independent checkpoints
+and external anchoring remain necessary. OS separation and credential permissions
+are deployment responsibilities. Concurrent external GitHub variable changes,
+remote requests already in flight, and effects completed before a crash are not
+made atomic by the controller's local locks.
 
 ## What "Success" Looks Like
 Bantis reliably detects the supply-chain scenarios defined later in the

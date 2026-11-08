@@ -6,6 +6,11 @@ under [ADR 0006](../docs/adr/0006-response-actions-and-kill-switch.md)
 (**Proposed**). It is a separate component from `ai-copilot/`, which
 keeps no capability to act.
 
+Read the [current design](../docs/response-controller-design.md) for components,
+state transitions, rollback, and deployment gates. The
+[security guarantees](../docs/response-controller-security.md) map each control
+to its implementation and tests, and describe the assumptions and remaining gaps.
+
 **What exists:** the general interface every action implements, the
 closed catalog, the proposal and approval model, the kill switch, an
 executor that enforces the design's rules in order, and the first real
@@ -91,8 +96,8 @@ before any effectful method is called:
 11. Automatic attempts reserve a durable slot, then `executing` is
     recorded before any effect. A failed write prevents execution and
     trips the switch.
-12. Persist rollback state for reversible actions, then execute, with the switch re-read right before the first step and
-    before every step after it.
+12. Persist rollback state for reversible actions, then execute, with the switch
+    re-read before the first effectful step and before each subsequent effect.
 13. Verification. A failed or raising post-check, or an action that
     raises, trips the switch to `execution-off`.
 
@@ -388,9 +393,9 @@ secret file with mode `0600` or `0400`. Use a dedicated approval secret,
 separate from provider tokens and executor credentials. Decision commands
 prompt without echoing the secret; it is never a command-line argument or
 an audit field. The recorded identity comes from the OS user ID, rather
-than an operator-supplied name. Read commands and queuing a proposal rely
-on trusted host access; approval, modification and dismissal additionally
-require the secret.
+than an operator-supplied name. Read commands and ordinary proposal submission
+rely on trusted host access; approval, modification, dismissal, and rollback
+requests additionally require the secret.
 
 ```bash
 cd response-controller
@@ -559,26 +564,33 @@ switch remains fully stopped when an operator requests a milder stop.
 
 The effective state is the more restrictive of the two. A missing,
 unreadable or malformed operator file, or an unreadable tripwire file,
-means `execution-off` with AI calls off. Only a readable file saying
-`clear` allows execution. Both files are replaced atomically.
+means `execution-off` with AI calls off. A valid operator file is required;
+`auto-off` still permits approved execution. Both files are replaced atomically.
 
-This split resolves a conflict in the design: tripwires must be able to
-engage the switch, but the controller must not be able to write the
-operator's switch. Its own file can only make things stricter.
+The two writers are logical roles. Deployment must enforce their OS permissions;
+the Python modules do not provision separate accounts or prevent a privileged
+writer from replacing either file. Provisioning must also account for the
+directory access needed by atomic replacement, journal creation, and lock files.
+The stop-writing APIs themselves only add restriction.
 
 ```bash
-export BANTIS_STATE_DIR=/var/lib/bantis      # operator-owned; the controller's user gets read access
-                                             # plus write access to kill-switch.tripped only
+export BANTIS_STATE_DIR=/path/to/operator-state  # provision and verify deployment permissions separately
 python3 cli.py status
 python3 cli.py kill --reason "investigating" [--level auto-off] [--ai-off]
 ```
 
-**Resuming is not built yet.** It needs the approver secret (design,
-"Engaging and resuming"). Until it exists, clearing is a deliberate
+**Resuming is not built yet.** The planned command requires the approver secret
+and approval invalidation (see the design's "Kill switch and recovery").
+Until it exists, clearing is a deliberate
 manual step by the operator. Write the operator file with
 `{"level": "clear", "ai_off": false, "reason": "...", "set_by": "..."}`
 and delete `kill-switch.tripped`. Review the enabled actions and dry-run
 configuration before clearing the switch.
+
+Stopping does not globally revoke stored approvals. Review pending partial
+approvals and incomplete execution attempts before restoring permission; dismiss
+and re-propose when a fresh review is needed. The planned authenticated `resume`
+command will need to enforce approval invalidation explicitly.
 
 ## Configuration
 
