@@ -316,6 +316,11 @@ See the [local run and verification guide](dashboard/README.md#run-locally).
 The [design baseline](docs/wizard-dashboard-design.md) still awaits the agreed
 diagrams before final visual approval.
 
+The [Live feed](dashboard/README.md#live-feed) at `/live-feed` streams a bounded
+window of incoming events, including uncorrelated telemetry. It provides filters,
+search, event inspection, pause/resume, clear-view controls, and explicit stale
+and possible-gap notices. Source polling defaults to every five seconds.
+
 ## License
 
 MIT

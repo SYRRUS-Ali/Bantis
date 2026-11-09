@@ -67,9 +67,16 @@ external APIs, and do not measure a live model's analysis quality.
 
 ## Running
 
+Response bridge subprocesses run in a separate session with piped stdin. This
+keeps `getpass` from reading pytest's controlling terminal instead of the supplied
+test credential. Commands without fixture input receive EOF, so the suite can
+run unattended from an interactive terminal as well as CI. Production approval
+authentication is unchanged.
+
 `test_e2e_dashboard.py` reads a disposable Detection Engine through the dashboard's
 authenticated HTTP proxy and WebSocket feed. It verifies incident detail,
-selected evidence fields, and stream revocation on sign-out. Dashboard component
+selected evidence fields, uncorrelated event arrivals with old timestamps,
+duplicate ingestion, and stream revocation on sign-out. Dashboard component
 and optional browser checks are documented in the [dashboard guide](../dashboard/README.md#verify).
 
 The in-process detection tests use a fresh SQLite database under each test's

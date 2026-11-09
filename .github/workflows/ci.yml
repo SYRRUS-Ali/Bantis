@@ -307,6 +307,10 @@ jobs:
           -r response-controller/requirements.txt
           -r dashboard/requirements.txt
 
+      - name: Test Detection Engine API and correlation
+        working-directory: detection-engine
+        run: python -m pytest tests -v
+
       - name: Test attack, detection, analysis, response, and audit
         run: python -m pytest tests -v --junitxml=test-results/security-e2e.xml
 

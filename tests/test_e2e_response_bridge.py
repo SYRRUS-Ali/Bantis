@@ -114,7 +114,8 @@ def stack(tmp_path, request):
 
 def run_component(component, arguments, env, *, input_text=None, expected=0):
     result = subprocess.run([sys.executable, *arguments], cwd=ROOT / component, env=env,
-                            text=True, input=input_text, capture_output=True, timeout=20, check=False)
+                            text=True, input=input_text if input_text is not None else "",
+                            capture_output=True, timeout=20, check=False, start_new_session=True)
     assert result.returncode == expected, result.stdout + result.stderr
     return result.stdout
 
