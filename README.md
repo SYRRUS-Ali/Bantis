@@ -4,6 +4,11 @@ Bantis is a self-hosted, open-source security platform that combines automated a
 
 > 🚧 Early development. Architecture docs are in `docs/`.
 
+The [wizard and dashboard design baseline](docs/wizard-dashboard-design.md)
+records UI requirements and backend gaps. It remains a draft pending the agreed
+diagrams; the [design review checklist](docs/wizard-dashboard-review.md) defines
+what must be checked before the final layout is frozen.
+
 ## Scope (v1)
 
 Bantis v1 focuses on **supply chain attacks** against a CI/CD pipeline and its dependencies, with AI-assisted analysis and human-approved response. See [`docs/threat-model.md`](docs/threat-model.md) for what's explicitly in and out of scope, and [`docs/mitre-mapping.md`](docs/mitre-mapping.md) for the attack techniques covered.
