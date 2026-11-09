@@ -1,6 +1,15 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const isLiveFeed = location.pathname === "/live-feed";
+const connectionLabel = () => $(isLiveFeed ? "live-connection" : "connection-label");
+const live = { snapshot: null, displayed: [], paused: false, cleared: new Set(),
+  clearedView: false, pauseTotal: null, gap: false, request: 0 };
+$("overview-content").hidden = isLiveFeed;
+$("live-feed-view").hidden = !isLiveFeed;
+$("page-name").textContent = isLiveFeed ? "Live feed" : "Overview";
+document.title = isLiveFeed ? "Bantis · Live feed" : "Bantis · Security overview";
+document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : "overview"}"]`).setAttribute("aria-current", "page");
 const state = { offset: 0, limit: 20, total: 0, filters: {}, socket: null, retry: null,
   delay: 1000, active: false, listRequest: 0, detailRequest: 0, lastList: null, snapshot: null,
   listController: null, detailController: null, lastSequence: -1, listBusy: false };
@@ -29,6 +38,11 @@ function signedOut() {
   state.lastList = null; state.snapshot = null; state.offset = 0; state.total = 0;
   state.lastSequence = -1;
   state.listBusy = false;
+  live.request++; live.snapshot = null; live.displayed = []; live.cleared.clear();
+  live.paused = false; live.gap = false; live.clearedView = false;
+  $("live-rows").replaceChildren();
+  $("live-count").textContent = "—"; $("live-matching").textContent = "—";
+  $("live-pause").textContent = "Pause display"; $("live-pause").setAttribute("aria-pressed", "false");
   $("incident-rows").replaceChildren(); $("detail-content").replaceChildren();
   $("incident-dialog").close();
   $("total-incidents").textContent = "—";
@@ -107,14 +121,16 @@ function renderSnapshot(snapshot) {
 function connect() {
   if (!state.active) return;
   stopSocket();
-  $("connection-label").textContent = "Connecting to live updates…";
+  connectionLabel().textContent = "Connecting to live updates…";
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${protocol}//${location.host}/ws`);
+  const socket = new WebSocket(`${protocol}//${location.host}${isLiveFeed ? "/ws/events" : "/ws"}`);
   state.socket = socket;
-  socket.onopen = () => { state.delay = 1000; $("connection-label").textContent = "Live connection · awaiting observation"; };
+  socket.onopen = () => { state.delay = 1000; connectionLabel().textContent = "Live connection · awaiting observation"; };
   socket.onmessage = (event) => {
     let snapshot;
+    if (state.socket !== socket || !state.active) return;
     try { snapshot = JSON.parse(event.data); } catch { return; }
+    if (isLiveFeed && snapshot.type === "events.snapshot") { renderLiveSnapshot(snapshot); return; }
     if (snapshot.type !== "dashboard.snapshot") return;
     renderSnapshot(snapshot);
     if (snapshot.sequence !== state.lastSequence) {
@@ -125,7 +141,8 @@ function connect() {
   };
   socket.onclose = async () => {
     if (!state.active) return;
-    $("connection-label").textContent = "Live connection lost · displayed data may be stale · reconnecting…";
+    connectionLabel().textContent = "Live connection lost · displayed data may be stale · reconnecting…";
+    if (isLiveFeed) renderLiveEvents();
     try { await api("/api/session"); } catch { if (!state.active) return; }
     state.lastSequence = -1;
     state.retry = setTimeout(connect, state.delay);
@@ -137,6 +154,7 @@ async function activate() {
   state.active = true; state.delay = 1000;
   $("login-screen").hidden = true; $("workspace").hidden = false;
   $("login-error").textContent = "";
+  if (isLiveFeed) { refreshLiveFeed(); connect(); return; }
   loadIncidents(); connect();
   try { renderSnapshot(await api("/api/status")); } catch {}
 }
@@ -145,6 +163,7 @@ async function showIncident(id) {
   state.detailController?.abort(); state.detailController = new AbortController();
   const options = { signal: state.detailController.signal };
   $("detail-content").replaceChildren(); $("detail-title").textContent = "Incident detail";
+  $("detail-kind").textContent = "INCIDENT INVESTIGATION";
   $("detail-notice").textContent = "Loading incident and evidence…";
   if (!$("incident-dialog").open) $("incident-dialog").showModal();
   try {
@@ -185,7 +204,7 @@ $("login-form").addEventListener("submit", async (event) => {
 });
 $("sign-out").addEventListener("click", async () => {
   try { await api("/api/session", { method: "DELETE" }); signedOut(); }
-  catch (error) { if (state.active) $("connection-label").textContent = `Sign out failed: ${error.message}`; }
+  catch (error) { if (state.active) connectionLabel().textContent = `Sign out failed: ${error.message}`; }
 });
 $("filters").addEventListener("submit", (event) => {
   event.preventDefault(); state.offset = 0; state.filters = {};
@@ -203,4 +222,117 @@ $("refresh").addEventListener("click", async () => {
 });
 $("close-detail").addEventListener("click", () => $("incident-dialog").close());
 $("incident-dialog").addEventListener("close", () => { state.detailRequest++; state.detailController?.abort(); });
+
+function renderLiveSnapshot(snapshot) {
+  if (!state.active) return;
+  if (live.snapshot?.observed_at && (!snapshot.observed_at || Date.parse(snapshot.observed_at) < Date.parse(live.snapshot.observed_at))) return;
+  if (live.snapshot?.total !== null && live.snapshot && snapshot.total !== null &&
+      (snapshot.total - live.snapshot.total > snapshot.limit || snapshot.total < live.snapshot.total)) live.gap = true;
+  if (live.paused && live.pauseTotal !== null && snapshot.total - live.pauseTotal > snapshot.limit) live.gap = true;
+  live.snapshot = snapshot;
+  if (!live.paused) live.displayed = snapshot.items.filter((event) => !live.cleared.has(event.event_id));
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    $("live-connection").textContent = snapshot.status === "available" ? "Live connection · periodic event updates" :
+      snapshot.status === "connecting" ? "Live connection · awaiting event source" : "Live connection · event source unavailable";
+  }
+  renderLiveEvents();
+}
+
+function renderLiveEvents() {
+  const snapshot = live.snapshot;
+  const level = $("event-level").value;
+  const source = $("event-source").value.trim();
+  const eventType = $("event-type").value.trim();
+  const search = $("event-search").value.trim().toLowerCase();
+  const matches = live.displayed.filter((event) => (!level || event.level === level) &&
+    (!source || event.source === source) && (!eventType || event.event_type === eventType) &&
+    (!search || [event.event_id, event.source, event.event_type, event.logger, JSON.stringify(event.details)].join(" ").toLowerCase().includes(search)));
+  const rows = matches.map((event) => {
+    const row = node("tr");
+    const levelCell = node("td"); levelCell.append(node("span", event.level, `pill log-${event.level.toLowerCase()}`));
+    const description = node("td");
+    const open = node("button", event.event_type, "incident-link"); open.type = "button";
+    open.addEventListener("click", () => showLiveEvent(event));
+    description.append(open, node("span", event.event_id, "pattern-label"));
+    const details = Object.entries(event.details).map(([key, value]) => `${key}: ${value}`).join(" · ");
+    row.append(node("td", time(event.received_at)), levelCell, node("td", event.source), description,
+      node("td", details ? details.slice(0, 140) + (details.length > 140 ? "…" : "") : "No selected details"));
+    return row;
+  });
+  $("live-rows").replaceChildren(...rows);
+  const ready = snapshot?.total !== null && snapshot?.total !== undefined;
+  $("live-count").textContent = ready ? String(live.displayed.length) : "—";
+  $("live-matching").textContent = ready ? String(matches.length) : "—";
+  $("live-mode").textContent = snapshot?.status === "unavailable" ? "Unavailable" : live.paused ? "Paused" :
+    ready && state.socket?.readyState !== WebSocket.OPEN ? "Disconnected" : ready ? "Live" : "Connecting";
+  $("live-cadence").textContent = snapshot ? `Source checked every ${snapshot.poll_seconds} ${snapshot.poll_seconds === 1 ? "second" : "seconds"}` : "Awaiting event source";
+  $("live-last-refresh").textContent = snapshot?.last_success_at ? `Last observed ${time(snapshot.last_success_at)}` : "Awaiting first successful observation";
+  $("live-window").textContent = ready ? `${matches.length} matching · ${live.displayed.length} in view · ${snapshot.total} stored events` : "No event data loaded";
+  const visibleIDs = new Set(live.displayed.map((event) => event.event_id));
+  const pending = snapshot?.items.filter((event) => !visibleIDs.has(event.event_id) && !live.cleared.has(event.event_id)).length || 0;
+  $("live-pending").textContent = live.paused ? `${pending} new in current window · resume to display` : "Newest arrivals first";
+  $("live-gap").hidden = !(snapshot?.gap_possible || live.gap);
+  const notice = $("live-notice");
+  notice.className = snapshot?.status === "unavailable" ? "notice error" : "notice";
+  if (snapshot?.status === "unavailable") {
+    notice.textContent = ready ? "Event source unavailable. Showing stale data from the last successful observation." : "Event source unavailable. No event data loaded.";
+  } else if (live.paused) {
+    notice.textContent = "Display paused. Updates continue in the background; resume to show the current window.";
+  } else if (!ready) {
+    notice.textContent = "Loading recent events…";
+  } else if (!live.displayed.length) {
+    notice.textContent = live.clearedView ? "View cleared. Waiting for new events." : "No events received yet. Waiting for incoming signals.";
+  } else {
+    notice.textContent = matches.length ? "Selected fields only. Open an event to inspect its details." : "No events match the current filters.";
+  }
+}
+
+async function refreshLiveFeed() {
+  const request = ++live.request;
+  try {
+    const snapshot = await api("/api/live-feed");
+    if (state.active && request === live.request) renderLiveSnapshot(snapshot);
+  } catch (error) {
+    if (state.active && request === live.request) {
+      $("live-notice").textContent = `${error.message} Displayed data may be stale.`;
+      $("live-notice").className = "notice error";
+    }
+  }
+}
+
+function showLiveEvent(event) {
+  state.detailRequest++; state.detailController?.abort();
+  $("detail-kind").textContent = "EVENT INSPECTION";
+  $("detail-title").textContent = event.event_type;
+  $("detail-notice").textContent = "Selected event fields. Raw messages and tool output are omitted.";
+  const facts = node("dl");
+  for (const [label, value] of [["Event ID", event.event_id], ["Log level", event.level], ["Source", event.source],
+    ["Logger", event.logger], ["Event time", time(event.timestamp)], ["Received", time(event.received_at)]]) {
+    facts.append(node("dt", label), node("dd", value));
+  }
+  const details = node("pre", JSON.stringify(event.details, null, 2), "event-details");
+  $("detail-content").replaceChildren(facts, node("h3", "Selected details"), details);
+  $("incident-dialog").showModal();
+}
+
+$("live-refresh").addEventListener("click", refreshLiveFeed);
+$("live-pause").addEventListener("click", () => {
+  live.paused = !live.paused;
+  live.pauseTotal = live.snapshot?.total ?? null;
+  if (!live.paused && live.snapshot) live.displayed = live.snapshot.items.filter((event) => !live.cleared.has(event.event_id));
+  $("live-pause").textContent = live.paused ? "Resume display" : "Pause display";
+  $("live-pause").setAttribute("aria-pressed", String(live.paused));
+  renderLiveEvents();
+});
+$("live-clear").addEventListener("click", () => {
+  live.cleared = new Set(live.snapshot?.items.map((event) => event.event_id) || []);
+  live.displayed = []; live.clearedView = true; live.pauseTotal = live.snapshot?.total ?? null;
+  renderLiveEvents();
+});
+$("live-filters").addEventListener("submit", (event) => { event.preventDefault(); renderLiveEvents(); });
+$("live-filters").addEventListener("input", renderLiveEvents);
+$("live-filters").addEventListener("reset", () => {
+  for (const id of ["event-level", "event-source", "event-type", "event-search"]) $(id).value = "";
+  renderLiveEvents();
+});
 (async () => { try { await api("/api/session"); await activate(); } catch {} })();

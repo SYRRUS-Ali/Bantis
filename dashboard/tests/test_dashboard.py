@@ -22,10 +22,30 @@ INCIDENT = {
     "summary": "Dependency signals observed",
 }
 
+EVENT = {
+    "event_id": "event-1",
+    "timestamp": "2026-11-09T09:00:00Z",
+    "received_at": "2026-11-09T09:00:01Z",
+    "level": "info",
+    "logger": "fixture",
+    "source": "pipeline",
+    "event_type": "container_image_pull",
+    "message": "private-raw-message",
+    "details": {"image": "fixture:latest", "tool_output_tail": "private-output"},
+}
+
 
 @pytest.fixture
 def stack():
-    upstream = {"status": 200, "invalid": None, "requests": [], "total": 1}
+    upstream = {
+        "status": 200,
+        "invalid": None,
+        "requests": [],
+        "total": 1,
+        "events": [EVENT],
+        "event_total": 1,
+        "event_status": 200,
+    }
 
     def handle(request):
         upstream["requests"].append(request)
@@ -33,6 +53,15 @@ def stack():
             return httpx.Response(upstream["status"], text="private-upstream-error")
         if upstream["invalid"] is not None:
             return httpx.Response(200, content=upstream["invalid"])
+        if request.url.path == "/events":
+            return httpx.Response(
+                upstream["event_status"],
+                json={
+                    "total": upstream["event_total"],
+                    "limit": 500,
+                    "items": upstream["events"],
+                },
+            )
         if request.url.path.endswith("/events"):
             return httpx.Response(
                 200,
@@ -99,6 +128,7 @@ def snapshot(ws):
         "/api/incidents",
         "/api/incidents/incident-1",
         "/api/incidents/incident-1/events",
+        "/api/live-feed",
     ],
 )
 def test_private_http_routes_require_session(stack, path):

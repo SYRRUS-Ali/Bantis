@@ -2,7 +2,7 @@ import asyncio
 import hmac
 import secrets
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -26,6 +26,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
+from .live_feed import LiveFeed
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "bantis_dashboard_session"
@@ -112,13 +113,17 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
         ) as client:
             app.state.detection = DetectionClient(client)
             app.state.feed = StatusFeed(app.state.detection, settings.poll_seconds)
-            task = asyncio.create_task(app.state.feed.run())
+            app.state.live_feed = LiveFeed(app.state.detection, settings.poll_seconds)
+            tasks = [
+                asyncio.create_task(feed.run())
+                for feed in (app.state.feed, app.state.live_feed)
+            ]
             try:
                 yield
             finally:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 sessions.entries.clear()
 
     app = FastAPI(
@@ -202,6 +207,10 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
     async def status(request: Request):
         return request.app.state.feed.snapshot
 
+    @app.get("/api/live-feed", dependencies=[Depends(authenticated)])
+    async def live_feed(request: Request):
+        return request.app.state.live_feed.snapshot
+
     @app.get(
         "/api/incidents",
         response_model=IncidentPage,
@@ -239,6 +248,7 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
         return await request.app.state.detection.evidence(incident_id)
 
     @app.websocket("/ws")
+    @app.websocket("/ws/events")
     async def websocket(websocket: WebSocket):
         session_id = websocket.cookies.get(COOKIE)
         if websocket.headers.get("origin") != settings.origin or not sessions.valid(
@@ -247,7 +257,11 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        feed = websocket.app.state.feed
+        feed = (
+            websocket.app.state.live_feed
+            if websocket.url.path == "/ws/events"
+            else websocket.app.state.feed
+        )
 
         async def send_updates():
             sequence = -1
@@ -288,6 +302,7 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
             await asyncio.gather(sender, receiver, return_exceptions=True)
 
     @app.get("/", include_in_schema=False)
+    @app.get("/live-feed", include_in_schema=False)
     async def index():
         return FileResponse(STATIC / "index.html")
 

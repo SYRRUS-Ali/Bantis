@@ -86,6 +86,7 @@ panels, or drawers.
 | Area | Information and behavior |
 |---|---|
 | Environment summary | Environment identity, service availability, last successful refresh, response mode, and effective stop state. Do not equate a health check with security readiness. |
+| Live feed | Incoming events before correlation, newest receipt first, through the implemented bounded event stream. Provide level/source/type filters, search, event inspection, pause/resume, clear-view controls, and explicit stale and possible-gap notices. |
 | Incident list | Severity, summary, pattern, MITRE techniques, detection confidence, and creation time. Support the existing severity, pattern, and since filters, with pagination and total matching count. |
 | Incident detail | Incident identity, immutable detection facts, and correlated evidence ordered by timestamp and event ID. Preserve list filters and pagination when returning from detail. |
 | Copilot context | Recorded reasoning, separately labeled AI confidence, and recommendation. Distinguish absent analysis, deferred or skipped analysis, provider outage, and stored analysis failure using authoritative backend state. |

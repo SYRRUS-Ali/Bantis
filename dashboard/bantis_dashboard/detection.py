@@ -7,6 +7,16 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 Severity = Literal["low", "medium", "high", "critical"]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+LIVE_DETAILS = {
+    "scenario",
+    "status",
+    "mitre_technique",
+    "artifact",
+    "tool_returncode",
+    "registry",
+    "image",
+}
 
 
 class Incident(BaseModel):
@@ -50,6 +60,49 @@ class Evidence(BaseModel):
         return Incident.utc_time(value)
 
 
+class LiveEvent(Evidence):
+    received_at: datetime
+    level: LogLevel
+    logger: str
+
+    @field_validator("received_at")
+    @classmethod
+    def received_utc(cls, value):
+        return Incident.utc_time(value)
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def normalize_level(cls, value):
+        return value.upper() if isinstance(value, str) else value
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def selected_details(cls, value):
+        if not isinstance(value, dict):
+            raise ValueError("Expected event details")
+        return {
+            key: item
+            for key, item in value.items()
+            if key in LIVE_DETAILS
+            and (item is None or isinstance(item, (str, int, float, bool)))
+        }
+
+
+class LiveEventPage(BaseModel):
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=500)
+    items: list[LiveEvent] = Field(max_length=500)
+
+    @field_validator("items")
+    @classmethod
+    def unique_events(cls, items):
+        if len({event.event_id for event in items}) != len(items):
+            raise ValueError("Duplicate event IDs")
+        return sorted(
+            items, key=lambda event: (event.received_at, event.event_id), reverse=True
+        )
+
+
 class UpstreamError(Exception):
     def __init__(self, status: int, message: str):
         self.status = status
@@ -78,7 +131,7 @@ class DetectionClient:
             return json.loads(content)
         except (httpx.HTTPError, OSError) as exc:
             raise UpstreamError(503, "Detection Engine is unavailable") from exc
-        except (ValueError, UnicodeError) as exc:
+        except (ValueError, UnicodeError, RecursionError) as exc:
             raise UpstreamError(502, "Detection Engine returned invalid data") from exc
 
     async def incidents(self, params=None) -> IncidentPage:
@@ -87,6 +140,16 @@ class DetectionClient:
         except ValidationError as exc:
             raise UpstreamError(
                 502, "Detection Engine returned invalid incident data"
+            ) from exc
+
+    async def live_events(self) -> LiveEventPage:
+        try:
+            return LiveEventPage.model_validate(
+                await self.get("events", {"limit": 500})
+            )
+        except ValidationError as exc:
+            raise UpstreamError(
+                502, "Detection Engine returned invalid live event data"
             ) from exc
 
     async def incident(self, incident_id: str) -> Incident:

@@ -27,18 +27,20 @@
 
   <div id="workspace" class="workspace" hidden>
     <aside class="sidebar">
-      <a href="#overview" class="brand"><span class="brand-mark" aria-hidden="true">B</span> bantis<span class="brand-dot">.</span></a>
+      <a href="/" class="brand"><span class="brand-mark" aria-hidden="true">B</span> bantis<span class="brand-dot">.</span></a>
       <p class="nav-label">WORKSPACE</p>
       <nav aria-label="Main navigation">
-        <a href="#overview" class="nav-item">Overview <span>↗</span></a>
-        <a href="#incidents" class="nav-item">Incidents <span>≡</span></a>
+        <a href="/" class="nav-item" data-page="overview">Overview <span>↗</span></a>
+        <a href="/live-feed" class="nav-item" data-page="live-feed">Live feed <span>◉</span></a>
+        <a href="/#incidents" class="nav-item">Incidents <span>≡</span></a>
       </nav>
       <div class="sidebar-note"><span class="small-dot"></span> LOCAL OPERATIONS<p>One environment.<br>Evidence first.</p></div>
       <button id="sign-out" class="sign-out">Sign out <span aria-hidden="true">↗</span></button>
     </aside>
 
     <main id="overview">
-      <header class="topbar"><span>WORKSPACE <span class="slash">/</span> Overview</span><span class="pill neutral">INITIAL RELEASE</span></header>
+      <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="page-name">Overview</span></span><span class="pill neutral">READ ONLY</span></header>
+      <div id="overview-content">
       <section class="page-heading">
         <div><p class="eyebrow">SECURITY OPERATIONS</p><h1>Environment overview<span class="title-dot">.</span></h1><p class="subtitle">Follow the signals. Inspect the evidence. Stay in control.</p></div>
         <button id="refresh" class="secondary">Refresh data <span aria-hidden="true">↻</span></button>
@@ -66,12 +68,41 @@
       </section>
 
       <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Copilot analysis, response approvals, audit history, and emergency controls are not connected to this interface yet. Use the local Response Controller CLI for supported response operations.</p></div></section>
+      </div>
+
+      <section id="live-feed-view" hidden aria-labelledby="live-title">
+        <div class="page-heading">
+          <div><p class="eyebrow">EVENT STREAM</p><h1 id="live-title">Live feed<span class="title-dot">.</span></h1><p class="subtitle">Incoming signals, before correlation. Newest arrivals first.</p></div>
+          <button id="live-refresh" class="secondary">Refresh feed <span aria-hidden="true">↻</span></button>
+        </div>
+        <div class="connection-bar" role="status" aria-live="polite"><span id="live-connection">Connecting to event updates…</span><span id="live-last-refresh">Awaiting first observation</span></div>
+        <section class="metrics" aria-label="Live feed status">
+          <article class="metric"><p class="metric-label">EVENTS IN CURRENT WINDOW</p><strong id="live-count">—</strong><p>Up to 500 recent arrivals</p></article>
+          <article class="metric"><p class="metric-label">MATCHING FILTERS</p><strong id="live-matching">—</strong><p>Filters apply to the current window</p></article>
+          <article class="metric"><p class="metric-label">FEED STATUS</p><strong id="live-mode" class="word-value">Connecting</strong><p id="live-cadence">Awaiting event source</p></article>
+        </section>
+        <div class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">DETECTION ENGINE EVENTS</p><h2>Incoming events</h2></div><div class="feed-actions"><button id="live-pause" class="secondary" aria-pressed="false">Pause display</button><button id="live-clear" class="text-button">Clear view</button></div></div>
+          <form id="live-filters" class="filters">
+            <div><label for="event-level">Log level</label><select id="event-level"><option value="">All levels</option><option>CRITICAL</option><option>ERROR</option><option>WARNING</option><option>INFO</option><option>DEBUG</option></select></div>
+            <div><label for="event-source">Source (exact match)</label><input id="event-source" type="text" maxlength="200" placeholder="Any source"></div>
+            <div><label for="event-type">Event type (exact match)</label><input id="event-type" type="text" maxlength="200" placeholder="Any event type"></div>
+            <div><label for="event-search">Search current events</label><input id="event-search" type="search" maxlength="200" placeholder="ID, type, or selected details"></div>
+            <button type="reset" class="text-button">Reset filters</button>
+          </form>
+          <p id="live-notice" class="notice" role="status" aria-live="polite">Loading recent events…</p>
+          <p id="live-gap" class="notice error" role="status" hidden>Feed coverage may have a gap. Events outside the current window are not replayed.</p>
+          <div class="table-scroll"><table><caption class="sr-only">Recent incoming events, ordered by receipt time. Open an event to inspect selected fields.</caption><thead><tr><th scope="col">Received (UTC)</th><th scope="col">Level</th><th scope="col">Source</th><th scope="col">Event / ID</th><th scope="col">Selected details</th></tr></thead><tbody id="live-rows"></tbody></table></div>
+          <div class="pagination"><span id="live-window">No event data loaded</span><span id="live-pending" aria-live="polite"></span></div>
+        </div>
+        <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Inspect the signal. Keep its context.</h2><p>Pausing freezes this display while updates continue to arrive. Clearing only resets this view. Raw messages and tool output are omitted; selected fields are available in event details.</p></div></section>
+      </section>
       <footer>BANTIS <span>Self-hosted security operations · All times in UTC</span></footer>
     </main>
   </div>
 
   <dialog id="incident-dialog" aria-labelledby="detail-title">
-    <div class="detail-heading"><p class="eyebrow">INCIDENT INVESTIGATION</p><button id="close-detail" class="secondary">Close ×</button></div>
+    <div class="detail-heading"><p id="detail-kind" class="eyebrow">INCIDENT INVESTIGATION</p><button id="close-detail" class="secondary">Close ×</button></div>
     <h2 id="detail-title">Incident detail</h2>
     <p id="detail-notice" role="status" aria-live="polite"></p>
     <div id="detail-content"></div>
