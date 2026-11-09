@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Bantis security operations dashboard">
+  <title>Bantis · Security overview</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <section id="login-screen" class="login-screen" aria-labelledby="login-title">
+    <div class="login-card">
+      <span class="brand-mark" aria-hidden="true">B</span>
+      <p class="eyebrow">BANTIS / SECURITY OPERATIONS</p>
+      <h1 id="login-title">Your environment.<br>Your visibility.</h1>
+      <p>Sign in with the dashboard access token configured on this host.</p>
+      <form id="login-form">
+        <label for="access-token">Dashboard access token</label>
+        <input id="access-token" type="password" required maxlength="512" autocomplete="off" spellcheck="false">
+        <button type="submit" class="primary">Open dashboard <span aria-hidden="true">→</span></button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="fine-print">Single environment · Read-only incident access</p>
+    </div>
+  </section>
+
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <a href="#overview" class="brand"><span class="brand-mark" aria-hidden="true">B</span> bantis<span class="brand-dot">.</span></a>
+      <p class="nav-label">WORKSPACE</p>
+      <nav aria-label="Main navigation">
+        <a href="#overview" class="nav-item">Overview <span>↗</span></a>
+        <a href="#incidents" class="nav-item">Incidents <span>≡</span></a>
+      </nav>
+      <div class="sidebar-note"><span class="small-dot"></span> LOCAL OPERATIONS<p>One environment.<br>Evidence first.</p></div>
+      <button id="sign-out" class="sign-out">Sign out <span aria-hidden="true">↗</span></button>
+    </aside>
+
+    <main id="overview">
+      <header class="topbar"><span>WORKSPACE <span class="slash">/</span> Overview</span><span class="pill neutral">INITIAL RELEASE</span></header>
+      <section class="page-heading">
+        <div><p class="eyebrow">SECURITY OPERATIONS</p><h1>Environment overview<span class="title-dot">.</span></h1><p class="subtitle">Follow the signals. Inspect the evidence. Stay in control.</p></div>
+        <button id="refresh" class="secondary">Refresh data <span aria-hidden="true">↻</span></button>
+      </section>
+      <div class="connection-bar" role="status" aria-live="polite"><span id="connection-label">Connecting to live updates…</span><span id="last-refresh">Awaiting first observation</span></div>
+
+      <section class="metrics" aria-label="Environment status">
+        <article class="metric"><p class="metric-label">CORRELATED INCIDENTS</p><strong id="total-incidents">—</strong><p id="total-caption">Waiting for Detection Engine</p></article>
+        <article class="metric"><p class="metric-label">DETECTION ENGINE</p><strong id="engine-status" class="word-value">Connecting</strong><p>Read-only incident source</p></article>
+        <article class="metric"><p class="metric-label">RESPONSE CONTROLLER</p><strong class="word-value">Not connected</strong><p>Execution and stop state unavailable</p></article>
+      </section>
+
+      <section id="incidents" class="panel" aria-labelledby="incidents-title">
+        <div class="panel-heading"><div><p class="eyebrow">DETECTION FEED</p><h2 id="incidents-title">Correlated incidents</h2></div><span class="pill neutral">READ ONLY</span></div>
+        <form id="filters" class="filters">
+          <div><label for="severity">Severity</label><select id="severity"><option value="">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div>
+          <div><label for="pattern">Pattern (exact match)</label><input id="pattern" maxlength="200" placeholder="Any pattern" type="text"></div>
+          <div><label for="since">Since (UTC)</label><input id="since" type="datetime-local"></div>
+          <button type="submit" class="secondary">Apply filters</button>
+          <button type="reset" class="text-button">Reset</button>
+        </form>
+        <p id="list-notice" class="notice" role="status" aria-live="polite">Loading incidents…</p>
+        <div class="table-scroll"><table><caption class="sr-only">Incidents matching the current filters. Open a summary to view its evidence.</caption><thead><tr><th scope="col">Severity</th><th scope="col">Incident / pattern</th><th scope="col">MITRE techniques</th><th scope="col">Detection confidence</th><th scope="col">Created (UTC)</th></tr></thead><tbody id="incident-rows"></tbody></table></div>
+        <div class="pagination"><span id="page-label">No data loaded</span><div><button id="previous" class="secondary" disabled>← Previous</button><button id="next" class="secondary" disabled>Next →</button></div></div>
+      </section>
+
+      <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Copilot analysis, response approvals, audit history, and emergency controls are not connected to this interface yet. Use the local Response Controller CLI for supported response operations.</p></div></section>
+      <footer>BANTIS <span>Self-hosted security operations · All times in UTC</span></footer>
+    </main>
+  </div>
+
+  <dialog id="incident-dialog" aria-labelledby="detail-title">
+    <div class="detail-heading"><p class="eyebrow">INCIDENT INVESTIGATION</p><button id="close-detail" class="secondary">Close ×</button></div>
+    <h2 id="detail-title">Incident detail</h2>
+    <p id="detail-notice" role="status" aria-live="polite"></p>
+    <div id="detail-content"></div>
+  </dialog>
+</body>
+</html>

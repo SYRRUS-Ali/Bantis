@@ -1,0 +1,1 @@
+"""Bantis dashboard service."""
