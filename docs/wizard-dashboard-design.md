@@ -3,9 +3,11 @@
 **Status:** Draft baseline; final layout freeze awaits the agreed diagrams.
 
 This document defines the UI requirements supported by the current Bantis
-contracts. No wizard, dashboard, setup authentication, or browser approval API
-is delivered by this documentation change. All interface copy and documentation
-must be in English.
+contracts. The [dashboard foundation](../dashboard/README.md) now provides an
+initial interface, local dashboard sessions, read-only incident access, selected
+evidence, and periodic WebSocket status updates. Wizard setup authentication and
+browser response approval remain unimplemented. All interface copy and
+documentation must be in English.
 
 ## Design references and freeze criteria
 
@@ -120,8 +122,8 @@ resume and approval invalidation remain unimplemented.
 
 | UI need | Existing source | Remaining work |
 |---|---|---|
-| Incident list and detail | Detection Engine `GET /incidents`, `GET /incidents/{id}` | Authenticated browser access; see [query guide](../detection-engine/README.md). |
-| Correlated evidence | Detection Engine `GET /incidents/{id}/events` | Authenticated browser access and safe evidence rendering. |
+| Incident list and detail | Detection Engine `GET /incidents`, `GET /incidents/{id}` through the dashboard session boundary | Local browser access is implemented; upstream authentication remains open. See [query guide](../detection-engine/README.md). |
+| Correlated evidence | Detection Engine `GET /incidents/{id}/events` through the dashboard | Selected fields render as text behind a dashboard session; raw messages and tool output are omitted. |
 | Recorded initial analysis | Copilot decision log; local controller bridge reads recorded context | Define authenticated retrieval; do not expose the SQLite file to the browser. |
 | Follow-up conversation | Copilot `GET` and `POST /incidents/{id}/questions` | Browser session integration; existing service bearer tokens stay server-side. See [Copilot guide](../ai-copilot/README.md). |
 | Setup and administrator | No setup backend | Define first-run locking, credentials, configuration persistence, and session lifecycle. |

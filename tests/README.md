@@ -39,7 +39,7 @@ is included in the pipeline notification, and pytest writes a JUnit report to
 To reproduce the CI check from the repository root:
 
 ```bash
-python -m pip install -r tests/requirements.txt -r attack-sim/requirements.txt -r ai-copilot/requirements.txt -r response-controller/requirements.txt
+python -m pip install -r tests/requirements.txt -r attack-sim/requirements.txt -r ai-copilot/requirements.txt -r response-controller/requirements.txt -r dashboard/requirements.txt
 python -m pytest tests -v --junitxml=/tmp/security-e2e.xml
 ```
 
@@ -66,6 +66,11 @@ the real implementations. The tests create no commits, build no images, call no
 external APIs, and do not measure a live model's analysis quality.
 
 ## Running
+
+`test_e2e_dashboard.py` reads a disposable Detection Engine through the dashboard's
+authenticated HTTP proxy and WebSocket feed. It verifies incident detail,
+selected evidence fields, and stream revocation on sign-out. Dashboard component
+and optional browser checks are documented in the [dashboard guide](../dashboard/README.md#verify).
 
 The in-process detection tests use a fresh SQLite database under each test's
 temporary directory and an operating-system-assigned loopback port. The shared

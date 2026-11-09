@@ -161,7 +161,7 @@ Being upfront about what's rough, not just what works:
 query API are built. What it does not do yet, and what must be fixed
 before it is exposed beyond localhost (notably: no authentication on
 any route), is in [`docs/m3-closure.md`](docs/m3-closure.md). The
-AI-assisted analysis layer (M4) and the dashboard come next.
+current AI-assisted analysis layer (M4) and dashboard foundation are described below.
 
 ### What's in it
 
@@ -206,7 +206,7 @@ range/api, nginx, attack-sim → POST /events → events table
                                                     │
                                    GET /incidents, /incidents/{id}
                                                     │
-                                   (dashboard — M4+, not built yet)
+                                   (dashboard/ — initial read-only interface)
 ```
 
 Full component table, data flow, and rules reference:
@@ -283,7 +283,7 @@ Full architecture and the recommend-only principle in detail:
 ### Known limitations
 
 - **The Copilot remains recommend-only.** The separate Response Controller now
-  provides local authenticated approval; a dashboard is still outstanding.
+  provides local authenticated approval; browser response approval is still outstanding.
 - **Prompt injection is reduced, not prevented** — recommend-only bounds
   a successful one to a misleading recommendation a person reviews.
 - **Explanation quality is not yet scored** against real model output.
@@ -303,6 +303,18 @@ remains Proposed; live deployment still depends on its security gates.
 - [Security guarantees and evidence](docs/response-controller-security.md):
   controls, test references, failure handling, assumptions, and operator checks.
 - [Configuration and CLI guide](response-controller/README.md).
+
+## Dashboard foundation
+
+The initial [dashboard](dashboard/README.md) is a separate FastAPI service with
+session authentication, read-only incident queries, WebSocket status updates,
+and a responsive English interface. It shows real Detection Engine data and
+explicit unavailable states when the source cannot be reached. Setup, Copilot
+analysis retrieval, and browser response controls remain future work.
+
+See the [local run and verification guide](dashboard/README.md#run-locally).
+The [design baseline](docs/wizard-dashboard-design.md) still awaits the agreed
+diagrams before final visual approval.
 
 ## License
 

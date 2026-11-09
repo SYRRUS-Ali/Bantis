@@ -9,6 +9,7 @@ on:
       - 'detection-engine/**'
       - 'ai-copilot/**'
       - 'response-controller/**'
+      - 'dashboard/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
   pull_request:
@@ -19,6 +20,7 @@ on:
       - 'detection-engine/**'
       - 'ai-copilot/**'
       - 'response-controller/**'
+      - 'dashboard/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
@@ -255,6 +257,33 @@ jobs:
       - name: Run scenario fingerprint tests
         run: python -m pytest tests -m fingerprint -v
 
+  dashboard-test:
+    name: Dashboard Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dashboard dependencies
+        run: python -m pip install -r dashboard/tests/requirements.txt
+
+      - name: Test dashboard API and WebSocket lifecycle
+        run: python -m pytest dashboard/tests -v
+
+      - name: Check dashboard JavaScript syntax
+        run: node --check dashboard/bantis_dashboard/static/app.js
+
   security-e2e:
     name: Attack to Audit End-to-End Tests
     runs-on: ubuntu-latest
@@ -276,6 +305,7 @@ jobs:
           -r attack-sim/requirements.txt
           -r ai-copilot/requirements.txt
           -r response-controller/requirements.txt
+          -r dashboard/requirements.txt
 
       - name: Test attack, detection, analysis, response, and audit
         run: python -m pytest tests -v --junitxml=test-results/security-e2e.xml
@@ -283,7 +313,7 @@ jobs:
   push:
     name: Push to GHCR
     runs-on: ubuntu-latest
-    needs: [test, sast, secrets-scan, dependency-scan, security-e2e]
+    needs: [test, sast, secrets-scan, dependency-scan, security-e2e, dashboard-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 10
     permissions:
@@ -491,7 +521,7 @@ jobs:
   notify:
     name: Notify Telegram
     runs-on: ubuntu-latest
-    needs: [build, test, sast, secrets-scan, dependency-scan, attack-sim-test, security-e2e, push, deploy-staging, promote-latest]
+    needs: [build, test, sast, secrets-scan, dependency-scan, attack-sim-test, dashboard-test, security-e2e, push, deploy-staging, promote-latest]
     if: always() && github.event_name != 'workflow_dispatch'
     timeout-minutes: 5
     steps:
@@ -504,13 +534,14 @@ jobs:
           R_SECRETS_SCAN: ${{ needs.secrets-scan.result }}
           R_DEPENDENCY_SCAN: ${{ needs.dependency-scan.result }}
           R_ATTACK_SIM: ${{ needs.attack-sim-test.result }}
+          R_DASHBOARD: ${{ needs.dashboard-test.result }}
           R_SECURITY_E2E: ${{ needs.security-e2e.result }}
           R_PUSH: ${{ needs.push.result }}
           R_DEPLOY_STAGING: ${{ needs.deploy-staging.result }}
           R_PROMOTE_LATEST: ${{ needs.promote-latest.result }}
           PROMOTION_HELD: ${{ vars.BANTIS_PROMOTION_HOLD != '' }}
         run: |
-          RESULTS="$R_BUILD $R_TEST $R_SAST $R_SECRETS_SCAN $R_DEPENDENCY_SCAN $R_ATTACK_SIM $R_SECURITY_E2E $R_PUSH $R_DEPLOY_STAGING $R_PROMOTE_LATEST"
+          RESULTS="$R_BUILD $R_TEST $R_SAST $R_SECRETS_SCAN $R_DEPENDENCY_SCAN $R_ATTACK_SIM $R_DASHBOARD $R_SECURITY_E2E $R_PUSH $R_DEPLOY_STAGING $R_PROMOTE_LATEST"
           if echo "$RESULTS" | grep -q "failure"; then
             echo "status=failure" >> "$GITHUB_OUTPUT"
             echo "emoji=❌" >> "$GITHUB_OUTPUT"
@@ -546,6 +577,7 @@ jobs:
             job_line "Secret Scanning (Gitleaks)" "$R_SECRETS_SCAN"
             job_line "Dependency Scan (pip-audit)" "$R_DEPENDENCY_SCAN"
             job_line "Attack-Sim Tests" "$R_ATTACK_SIM"
+            job_line "Dashboard Tests" "$R_DASHBOARD"
             job_line "Attack to Audit E2E" "$R_SECURITY_E2E"
             job_line "Push to GHCR" "$R_PUSH"
             job_line "Deploy (Staging)" "$R_DEPLOY_STAGING"
