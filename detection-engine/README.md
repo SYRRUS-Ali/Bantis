@@ -182,6 +182,19 @@ that, incidents sharing a timestamp have no defined order across
 `limit`/`offset` pages, so a client paging through could see one twice
 and miss another.
 
+**The Live feed query reads events before correlation.** `GET /events` returns
+`{total, limit, items}`, newest receipt first, with event ID as the deterministic
+tiebreak. `limit` defaults to 500 and accepts 1–500. Occurrence time does not
+control arrival order, so late telemetry remains visible. Each item includes
+event ID, UTC occurrence and receipt times, normalized log level, logger, source,
+type, and selected scalar details (`scenario`, `status`, `mitre_technique`,
+`artifact`, `tool_returncode`, `registry`, `image`). Raw messages and tool output
+are omitted. This selection does not promise secret-free field contents.
+The route shares the existing localhost-only trust assumption and has no
+authentication. Browser access uses the dashboard's session boundary through
+the [Live feed](../dashboard/README.md#live-feed). This is a bounded recent
+window, not a replay endpoint; `POST /events` remains idempotent and unchanged.
+
 ## Database
 
 No `docker-compose`/`.env` setup exists for this service yet (unlike

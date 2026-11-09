@@ -104,6 +104,10 @@ tables, and explicit non-goals: [`docs/correlation-design.md`](correlation-desig
 - `GET /health` — liveness.
 - `POST /events` — ingestion; idempotent on `event_id` (a duplicate
   returns the existing record, 200, rather than erroring).
+- `GET /events` — selected fields for the dashboard Live feed, ordered by
+  `(received_at, event_id)` descending. `limit` defaults to 500, accepts 1–500,
+  and returns `{total, limit, items}`. Messages and raw tool output are omitted;
+  the bounded query does not guarantee replay or continuous coverage.
 - `GET /incidents` — list, newest first; filters (`severity` exact-match
   and validated, `pattern` exact-match and intentionally *not*
   validated against a closed set, `since`), pagination (`limit`,

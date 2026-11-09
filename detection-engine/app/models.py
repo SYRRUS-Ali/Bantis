@@ -21,7 +21,6 @@ UtcDatetime = Annotated[datetime, AfterValidator(as_utc)]
 
 
 class EventIn(BaseModel):
-
     timestamp: UtcDatetime
     level: str = Field(min_length=1)
     logger: str = Field(min_length=1)
@@ -35,7 +34,9 @@ class EventIn(BaseModel):
     @classmethod
     def _level_is_a_known_log_level(cls, value: str) -> str:
         if value.upper() not in _VALID_LEVELS:
-            raise ValueError(f"level must be one of {sorted(_VALID_LEVELS)}, got {value!r}")
+            raise ValueError(
+                f"level must be one of {sorted(_VALID_LEVELS)}, got {value!r}"
+            )
         return value
 
 
@@ -45,8 +46,52 @@ class EventOut(EventIn):
     model_config = ConfigDict(from_attributes=True)
 
 
-class IncidentOut(BaseModel):
+class LiveEventOut(BaseModel):
+    """Selected fields for operator streaming; raw messages never enter the feed."""
 
+    event_id: str
+    timestamp: UtcDatetime
+    received_at: UtcDatetime
+    level: str
+    logger: str
+    source: str
+    event_type: str
+    details: dict = Field(default_factory=dict)
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("level")
+    @classmethod
+    def normalize_level(cls, value: str) -> str:
+        return value.upper()
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def select_details(cls, value: dict) -> dict:
+        allowed = {
+            "scenario",
+            "status",
+            "mitre_technique",
+            "artifact",
+            "tool_returncode",
+            "registry",
+            "image",
+        }
+        return {
+            key: item
+            for key, item in value.items()
+            if key in allowed
+            and (item is None or isinstance(item, (str, int, float, bool)))
+        }
+
+
+class LiveEventListOut(BaseModel):
+    total: int
+    limit: int
+    items: list[LiveEventOut]
+
+
+class IncidentOut(BaseModel):
     incident_id: str
     created_at: UtcDatetime
     pattern: str

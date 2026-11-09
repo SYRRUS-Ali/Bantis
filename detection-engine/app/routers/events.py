@@ -1,12 +1,27 @@
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.event_models import EventORM
-from app.models import EventIn, EventOut
+from app.models import EventIn, EventOut, LiveEventListOut
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+
+@router.get("", response_model=LiveEventListOut)
+def recent_events(
+    limit: int = Query(default=500, ge=1, le=500),
+    session: Session = Depends(get_session),
+) -> LiveEventListOut:
+    query = session.query(EventORM)
+    total = query.count()
+    items = (
+        query.order_by(EventORM.received_at.desc(), EventORM.event_id.desc())
+        .limit(limit)
+        .all()
+    )
+    return LiveEventListOut(total=total, limit=limit, items=items)
 
 
 @router.post("", response_model=EventOut)
