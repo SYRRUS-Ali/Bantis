@@ -491,3 +491,20 @@ for dependency injection, and every test passes a fake object with a
 `.messages.create()` method instead, the same pattern `attack-sim`'s
 tests use to fake out `docker`/`gitleaks` rather than needing them
 installed.
+
+### Recorded analysis retrieval
+
+`GET /incidents/{incident_id}/analysis` uses the same bearer authentication as
+questions and returns selected decision fields: record identity and timestamp,
+outcome, model, note, structured analysis, and `can_ask`. It does not invoke the
+provider or return prompts, raw attempts, or the recorded request payload.
+`status` distinguishes `analyzed`, `skipped`, `failed`, and `not_recorded`.
+The last state cannot distinguish pending work, worker deferral, or a provider
+outage because those transient conditions are not persisted in the decision log.
+Only successful analysis with a recorded grounding request permits follow-ups;
+failed analysis returns 409 when questioned.
+
+The [dashboard Incidents page](../dashboard/README.md#incidents-and-ai-analysis)
+proxies retrieval and questions through its session boundary. Configure its
+`COPILOT_API_URL` and server-side `COPILOT_API_TOKEN`, using the same service token
+as this API. Restart the API and dashboard after updating.

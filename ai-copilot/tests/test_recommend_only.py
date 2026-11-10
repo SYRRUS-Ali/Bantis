@@ -74,6 +74,7 @@ def test_the_api_offers_no_way_to_act_on_an_incident(tmp_path):
     assert routes == {
         ("GET", "/health"),
         ("GET", "/usage"),
+        ("GET", "/incidents/{incident_id}/analysis"),
         ("GET", "/incidents/{incident_id}/questions"),
         ("POST", "/incidents/{incident_id}/questions"),
     }

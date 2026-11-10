@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from budget import DEFAULT_MAX_TOKENS_PER_DAY, TokenBudget
 from decision_log import DEFAULT_PATH as DEFAULT_DECISION_LOG_PATH
 from decision_log import DecisionLog, FollowupRecord
+from models import CopilotResponse
 from providers.base import AIProvider, ProviderUnavailableError
 
 logger = logging.getLogger("ai_copilot.api")
@@ -60,6 +62,18 @@ class UsageOut(BaseModel):
     limit: int | None
     remaining: int | None
     resets_at: datetime
+
+
+class AnalysisOut(BaseModel):
+    incident_id: str
+    status: Literal["not_recorded", "skipped", "failed", "analyzed"]
+    recorded_at: datetime | None = None
+    record_id: str | None = None
+    outcome: str | None = None
+    model: str | None = None
+    note: str | None = None
+    analysis: CopilotResponse | None = None
+    can_ask: bool = False
 
 
 class FollowupOut(BaseModel):
@@ -116,6 +130,35 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get(
+        "/incidents/{incident_id}/analysis",
+        response_model=AnalysisOut,
+        dependencies=[Depends(require_token)],
+    )
+    def analysis(incident_id: str) -> AnalysisOut:
+        decisions = decision_log.for_incident(incident_id)
+        if not decisions:
+            # No record cannot distinguish pending work, deferral, or an outage.
+            return AnalysisOut(incident_id=incident_id, status="not_recorded")
+        record = decisions[0].record
+        if record.outcome == "skipped":
+            state = "skipped"
+        elif record.response is None or record.response.proposed_action.type == "analysis_failed":
+            state = "failed"
+        else:
+            state = "analyzed"
+        return AnalysisOut(
+            incident_id=incident_id,
+            status=state,
+            recorded_at=record.recorded_at,
+            record_id=record.record_id,
+            outcome=record.outcome,
+            model=record.model,
+            note=record.note,
+            analysis=record.response,
+            can_ask=state == "analyzed" and record.request is not None,
+        )
+
     @app.post(
         "/incidents/{incident_id}/questions",
         status_code=status.HTTP_201_CREATED,
@@ -124,7 +167,10 @@ def create_app(
     )
     def ask(incident_id: str, body: QuestionIn) -> FollowupOut:
         record = analyzed_decision(incident_id)
-        if record.request is None or record.response is None:
+        if (
+            record.request is None or record.response is None
+            or record.response.proposed_action.type == "analysis_failed"
+        ):
             # A skipped incident, or one whose evidence was incomplete: there
             # is no recorded request to ground an answer in, and fetching raw
             # events here would bypass the converter's allowlist.
