@@ -10,6 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import urlopen
 
@@ -20,7 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class FixtureHandler(BaseHTTPRequestHandler):
     available = True
-    live_events = []
+    live_events: ClassVar[list] = []
+    analysis_state = "analyzed"
+    copilot_available = True
+    questions: ClassVar[list] = []
 
     def log_message(self, *_args):
         pass
@@ -31,6 +35,47 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         url = urlsplit(self.path)
+        if url.path.endswith(("/analysis", "/questions")):
+            if (
+                self.headers.get("Authorization")
+                != "Bearer browser-fixture-copilot-token"
+            ):
+                self.send_error(401)
+                return
+            if not self.copilot_available:
+                self.send_error(503)
+                return
+            incident_id = url.path.split("/")[2]
+            payload = (
+                self.questions
+                if url.path.endswith("/questions")
+                else {
+                    "incident_id": incident_id,
+                    "status": self.analysis_state,
+                    "can_ask": self.analysis_state == "analyzed",
+                    "record_id": "record-1",
+                    "recorded_at": "2026-11-09T09:00:00Z",
+                    "model": "fixture-model",
+                    "outcome": "flag_for_review",
+                    "note": None,
+                    "analysis": {
+                        "incident_id": incident_id,
+                        "reasoning": '<img src=x onerror="window.untrustedExecuted=true"> Correlated evidence supports review.',
+                        "confidence": 0.7,
+                        "model": "fixture-model",
+                        "generated_at": "2026-11-09T09:00:00Z",
+                        "proposed_action": {
+                            "type": "flag_for_review",
+                            "description": "Investigate these signals.",
+                            "requires_approval": True,
+                        },
+                    }
+                    if self.analysis_state in {"analyzed", "failed"}
+                    else None,
+                }
+            )
+            self.send_json(payload)
+            return
         incidents = [
             {
                 "incident_id": f"incident-{index}",
@@ -98,6 +143,100 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def send_json(self, payload, status=200):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.headers.get("Authorization") != "Bearer browser-fixture-copilot-token":
+            self.send_error(401)
+            return
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        record = {
+            "followup_id": f"question-{len(self.questions) + 1}",
+            "incident_id": self.path.split("/")[2],
+            "asked_at": "2026-11-09T10:00:00Z",
+            "question": body["question"],
+            "answer": "Review the evidence timeline first.",
+            "model": "fixture-model",
+        }
+        self.questions.append(record)
+        self.send_json(record, 201)
+
+
+def check_incidents(page, screenshots):
+    page.get_by_role("link", name="Incidents", exact=True).click()
+    expect(page.locator('[data-page="incidents"]')).to_have_attribute(
+        "aria-current", "page"
+    )
+    expect(page.get_by_role("heading", name="Incidents.", exact=True)).to_be_visible()
+    page.locator("#severity").select_option("high")
+    page.get_by_role("button", name="Apply filters").click()
+    expect(page.locator("#incident-rows tr")).to_have_count(1)
+    page.locator("#incident-rows .incident-link").click()
+    expect(page.locator("#analysis-content")).to_contain_text("Analysis recorded")
+    expect(page.locator("#analysis-content")).to_contain_text(
+        "70% · separate from detection confidence"
+    )
+    expect(page.locator("#ask-question")).to_be_enabled()
+    assert page.locator("#analysis-panel img").count() == 0
+    page.locator("#question").fill("Why review this evidence?")
+    page.locator("#ask-question").click()
+    expect(page.locator("#conversation")).to_contain_text(
+        "Review the evidence timeline first."
+    )
+    expect(page.locator("#question")).to_have_value("")
+    expect(page.locator("#ask-question")).to_be_enabled()
+    FixtureHandler.copilot_available = False
+    page.locator("#analysis-refresh").click()
+    expect(page.locator("#analysis-notice")).to_contain_text("Showing stale analysis")
+    expect(page.locator("#analysis-content")).to_contain_text("Analysis recorded")
+    expect(page.locator("#ask-question")).to_be_disabled()
+    FixtureHandler.copilot_available = True
+    for state, label in [
+        ("not_recorded", "No analysis recorded"),
+        ("skipped", "Analysis skipped"),
+        ("failed", "Stored analysis failed"),
+    ]:
+        FixtureHandler.analysis_state = state
+        page.locator("#analysis-refresh").click()
+        expect(page.locator("#analysis-content")).to_contain_text(label)
+        expect(page.locator("#ask-question")).to_be_disabled()
+    FixtureHandler.analysis_state = "analyzed"
+    page.locator("#analysis-refresh").click()
+    expect(page.locator("#ask-question")).to_be_enabled()
+    page.locator("#question").fill("Keep my draft")
+    page.locator("#analysis-refresh").click()
+    expect(page.locator("#ask-question")).to_be_enabled()
+    expect(page.locator("#question")).to_have_value("Keep my draft")
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.locator("#incident-dialog").evaluate("el => el.scrollTop = 0")
+    if screenshots:
+        page.screenshot(
+            path=str(screenshots / "incident-analysis-desktop.png"), full_page=True
+        )
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.locator("#incident-dialog").evaluate("el => el.scrollTop = 0")
+    assert page.locator("#incident-dialog").evaluate(
+        "el => el.scrollWidth <= el.clientWidth"
+    )
+    if screenshots:
+        page.screenshot(
+            path=str(screenshots / "incident-analysis-mobile.png"), full_page=True
+        )
+    page.keyboard.press("Escape")
+    expect(page.locator("#incident-rows tr")).to_have_count(1)
+    expect(page.locator("#severity")).to_have_value("high")
+    page.locator("#incident-rows .incident-link").click()
+    expect(page.locator("#question")).to_have_value("")
+    expect(page.locator("#conversation")).to_contain_text("Why review this evidence?")
+    page.keyboard.press("Escape")
+    assert page.evaluate("window.untrustedExecuted") is None
 
 
 def check_live_feed(page, screenshots):
@@ -228,6 +367,8 @@ def main():
             "DASHBOARD_ORIGIN": origin,
             "DETECTION_ENGINE_URL": f"http://127.0.0.1:{upstream.server_port}",
             "DASHBOARD_POLL_SECONDS": "1",
+            "COPILOT_API_URL": f"http://127.0.0.1:{upstream.server_port}",
+            "COPILOT_API_TOKEN": "browser-fixture-copilot-token",
         }
         process = subprocess.Popen(
             [
@@ -345,6 +486,7 @@ def main():
                         path=str(args.screenshots / "dashboard-mobile.png"),
                         full_page=True,
                     )
+                check_incidents(page, args.screenshots)
                 check_live_feed(page, args.screenshots)
                 page.get_by_role("button", name="Sign out").click()
                 expect(page.locator("#login-screen")).to_be_visible()
@@ -353,7 +495,7 @@ def main():
                 assert not errors, errors
                 browser.close()
                 print(
-                    "PASS: dashboard and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    "PASS: dashboard, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()

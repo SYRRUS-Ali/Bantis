@@ -7,8 +7,8 @@ build, CDN, external font, database, or model key is required.
 
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
-still requires the agreed diagrams. The wizard, Copilot analysis retrieval,
-controller review, audit, emergency stop, and resume are not implemented here.
+still requires the agreed diagrams. The wizard, controller review, audit, emergency stop, and resume are not implemented here.
+The Incidents page includes recorded Copilot analysis and follow-up questions.
 The dashboard does not change controller configuration or execute actions.
 
 ## Run locally
@@ -47,6 +47,8 @@ reports the source as unavailable. No demo incidents are generated.
 | `DASHBOARD_TOKEN` | Required | Separate dashboard credential, 32–512 bytes; never use a controller approver secret. |
 | `DASHBOARD_ORIGIN` | `http://127.0.0.1:8200` | Exact browser origin, without a path, query, or credentials. Used for host and browser origin checks. |
 | `DETECTION_ENGINE_URL` | `http://127.0.0.1:8000` | Server-side upstream address; never supplied by browser requests. |
+| `COPILOT_API_URL` | `http://127.0.0.1:8100` | Server-side Copilot API address. |
+| `COPILOT_API_TOKEN` | Optional | Copilot service bearer token (at least 16 ASCII characters, no whitespace); kept server-side. Without it, the panel reports unconfigured. |
 | `DASHBOARD_POLL_SECONDS` | `5` | Shared status and event polling interval, from 1 to 300 seconds. |
 
 Keep this foundation bound to loopback. The Detection Engine still has
@@ -59,7 +61,7 @@ HTTPS origins cause the session cookie to use `Secure`.
 
 | Route | Access | Behavior |
 |---|---|---|
-| `GET /`, `/live-feed`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
+| `GET /`, `/live-feed`, `/incidents`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
 | `GET /health` | Public | Dashboard process liveness, independent of upstream availability. |
 | `POST /api/session` | Dashboard token | Creates an opaque, HttpOnly, SameSite=Strict session cookie. |
 | `GET /api/session` | Session | Checks current authentication. |
@@ -68,6 +70,9 @@ HTTPS origins cause the session cookie to use `Secure`.
 | `GET /api/incidents` | Session | Forwards validated severity, pattern, since, limit, and offset parameters. |
 | `GET /api/incidents/{id}` | Session | Read-only incident detail. |
 | `GET /api/incidents/{id}/events` | Session | Selected evidence fields ordered by UTC timestamp and event ID. |
+| `GET /api/incidents/{id}/analysis` | Session | Selected recorded analysis fields from the authenticated Copilot API. |
+| `GET /api/incidents/{id}/questions` | Session | Recorded questions and replies in chronological order. |
+| `POST /api/incidents/{id}/questions` | Session + same Origin | Validated question; calls the Copilot once, with no automatic retry. |
 | `WS /ws` | Session + exact Origin | Sends the latest status immediately, then a snapshot after every poll. |
 | `GET /api/live-feed` | Session | Most recent shared event snapshot; preserves the last successful window during outages. |
 | `WS /ws/events` | Session + exact Origin | Sends the current event window immediately, then a snapshot after every event poll. |
@@ -106,6 +111,44 @@ unavailable label and last-success timestamp. The incident list retains its last
 successful rows with a stale notice. Initial failure displays no data rather
 than a zero incident count. The backend does not cache incident pages for new
 requests. Filters and pagination survive opening and closing incident detail.
+
+## Incidents and AI analysis
+
+Open **http://127.0.0.1:8200/incidents** or select **Incidents**. Severity,
+exact pattern, UTC start time, and pagination use the Detection Engine query API.
+Opening and closing an investigation preserves the current list state.
+
+Start the [Copilot worker and API](../ai-copilot/README.md) with the same decision
+log, then configure `COPILOT_API_URL` and `COPILOT_API_TOKEN` on the dashboard
+process and restart it. The dashboard token and Copilot bearer token are separate
+credentials. Use hidden shell prompts for both; never put them in URLs or browser
+storage. No model key is needed by the dashboard.
+
+The investigation displays incident facts and a selected evidence timeline beside:
+
+- Recorded reasoning, AI confidence (separate from detection confidence), model,
+  generation time, decision record identity, outcome, and recommendation.
+- Distinct states for successful, skipped, failed, and absent analysis. An absent
+  decision does not prove a provider outage or deferral: the worker does not
+  persist those transient states. The panel explains this uncertainty.
+- Ordered recorded follow-up questions and answers. Sending is enabled only for
+  successful analysis with grounding context and after conversation retrieval.
+  The Copilot enforces credential screening, rate limits, and its token budget.
+- **Refresh analysis** retrieves analysis and conversation without replacing a
+  draft. Analysis is loaded on opening and refreshed manually, independently of
+  the incident list's periodic updates. Failed refreshes retain previous content
+  with a stale notice and disable questions until a successful refresh.
+
+Follow-ups can incur provider cost. Submission is disabled while a request is in
+flight. A failed or interrupted request may already have reached the provider;
+refresh conversation before retrying. The dashboard never retries POST requests.
+GET requests have a three-second timeout; questions have a 90-second timeout.
+Copilot responses are limited to 2 MB, validated, and rendered as plain text.
+Prompts, raw provider attempts, and request payloads are excluded from retrieval.
+Service errors are sanitized, including invalid bearer-token responses, which do
+not revoke the independent dashboard session. Evidence still works if Copilot is
+unconfigured or unavailable. Recommendations and answers execute no actions;
+response operations remain in the local controller CLI.
 
 ## Live feed
 
@@ -198,7 +241,9 @@ python dashboard/scripts/browser_smoke.py --python "$PWD/range/.venv/bin/python"
 The script covers sign-in failure and success, live updates, pagination,
 filters, empty results, evidence, untrusted text, stale data, reconnection,
 mobile overflow, and sign-out. Live feed checks also cover arrivals, filters,
-pause/resume, clear, bounded history, and gaps. Screenshots contain synthetic test
+pause/resume, clear, bounded history, and gaps. Incidents checks cover recorded
+analysis, questions, stale analysis, absent/skipped/failed states, preserved drafts,
+and mobile investigation layout. Screenshots contain synthetic test
 incidents and events.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,
 and includes Detection Engine tests and real query integration in the end-to-end job. Browser
