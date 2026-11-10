@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import anyio
 import httpx
 from fastapi import (
     Depends,
@@ -364,20 +365,21 @@ def create_app(
                 if message["type"] == "websocket.disconnect":
                     return
 
-        sender = asyncio.create_task(send_updates())
-        receiver = asyncio.create_task(receive_disconnect())
-        try:
-            done, _ = await asyncio.wait(
-                {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                task.result()
-        except (WebSocketDisconnect, TimeoutError, RuntimeError):
-            pass
-        finally:
-            sender.cancel()
-            receiver.cancel()
-            await asyncio.gather(sender, receiver, return_exceptions=True)
+        # Keep both stream tasks inside the connection's cancellation scope.
+        # Raw asyncio tasks plus an unshielded gather can leak CancelledError
+        # when ASGI shutdown races with disconnect cleanup.
+        async with anyio.create_task_group() as tasks:
+
+            async def run_stream(operation):
+                try:
+                    await operation()
+                except (WebSocketDisconnect, TimeoutError, RuntimeError):
+                    pass
+                finally:
+                    tasks.cancel_scope.cancel()
+
+            tasks.start_soon(run_stream, send_updates)
+            tasks.start_soon(run_stream, receive_disconnect)
 
     @app.get("/", include_in_schema=False)
     @app.get("/live-feed", include_in_schema=False)
