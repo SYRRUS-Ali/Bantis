@@ -7,7 +7,8 @@ build, CDN, external font, database, or model key is required.
 
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
-still requires the agreed diagrams. The wizard, controller review, audit, emergency stop, and resume are not implemented here.
+still requires the agreed diagrams. The wizard, controller review, emergency stop, and resume are not implemented here.
+Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
 The dashboard does not change controller configuration or execute actions.
 
@@ -49,6 +50,7 @@ reports the source as unavailable. No demo incidents are generated.
 | `DETECTION_ENGINE_URL` | `http://127.0.0.1:8000` | Server-side upstream address; never supplied by browser requests. |
 | `COPILOT_API_URL` | `http://127.0.0.1:8100` | Server-side Copilot API address. |
 | `COPILOT_API_TOKEN` | Optional | Copilot service bearer token (at least 16 ASCII characters, no whitespace); kept server-side. Without it, the panel reports unconfigured. |
+| `DASHBOARD_AUDIT_PATH` | Optional | Server-configured path to the controller `reviews.sqlite3`; absent means unconfigured. The dashboard only reads it. |
 | `DASHBOARD_POLL_SECONDS` | `5` | Shared status and event polling interval, from 1 to 300 seconds. |
 
 Keep this foundation bound to loopback. The Detection Engine still has
@@ -61,11 +63,12 @@ HTTPS origins cause the session cookie to use `Secure`.
 
 | Route | Access | Behavior |
 |---|---|---|
-| `GET /`, `/live-feed`, `/incidents`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
+| `GET /`, `/live-feed`, `/incidents`, `/audit-log`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
 | `GET /health` | Public | Dashboard process liveness, independent of upstream availability. |
 | `POST /api/session` | Dashboard token | Creates an opaque, HttpOnly, SameSite=Strict session cookie. |
 | `GET /api/session` | Session | Checks current authentication. |
 | `DELETE /api/session` | Current cookie | Revokes the session and clears the cookie; idempotent. |
+| `GET /api/audit-log` | Session | Read-only, verified, filtered controller events with pagination. |
 | `GET /api/status` | Session | Most recent shared status snapshot, initially `connecting`. |
 | `GET /api/incidents` | Session | Forwards validated severity, pattern, since, limit, and offset parameters. |
 | `GET /api/incidents/{id}` | Session | Read-only incident detail. |
@@ -149,6 +152,60 @@ Service errors are sanitized, including invalid bearer-token responses, which do
 not revoke the independent dashboard session. Evidence still works if Copilot is
 unconfigured or unavailable. Recommendations and answers execute no actions;
 response operations remain in the local controller CLI.
+
+## Audit log
+
+Set `DASHBOARD_AUDIT_PATH` to the absolute path of the existing controller journal
+(the file is `$BANTIS_STATE_DIR/reviews.sqlite3`) in the dashboard process, restart
+it, and open **http://127.0.0.1:8200/audit-log**. For example, when the dashboard
+runs on the same host and `BANTIS_STATE_DIR` already identifies controller state:
+
+```bash
+export DASHBOARD_AUDIT_PATH="$BANTIS_STATE_DIR/reviews.sqlite3"
+```
+
+The dashboard account needs read access to the journal and its parent directory;
+use a read-only mount for a separate container, including SQLite WAL sidecars
+when the controller uses WAL. Do not make the state directory publicly readable.
+The dashboard never initializes, migrates, repairs, or appends to the database,
+and has no browser parameter for changing the source path. The controller does
+not need a new HTTP listener. Detection Engine and Copilot outages do not prevent
+audit reads. Unconfigured, missing, unreadable, or unsupported journals return an
+explicit unavailable state, distinct from an empty valid journal.
+
+- Entries are ordered by descending journal sequence, independent of event time.
+  Filters match exact event, actor (including `initiated_by`), action ID, incident
+  ID, and outcome. Inclusive UTC start/end times filter recorded event times.
+  Pages contain 20, 50, or 100 entries, with the total matching count.
+- Each successful read verifies **every event**, including those outside the
+  filters, in one read transaction. The page shows the checked journal head and
+  observation time. Interior deletion, changed payloads, and broken hashes fail
+  the read; no partial result is returned. **Consistent** means local event-chain
+  consistency, not external anchoring or proof of authenticity. Valid tail
+  deletion, journal replacement, and administrator rebuilding require an
+  independently retained checkpoint to detect. Proposal and approval tables are
+  not covered by this event-chain check.
+- Pagination retains `through_sequence` so new appends do not shift the current
+  browsing window. **Refresh log** starts from the latest sequence and first
+  page, keeping filters. Filter changes also start a fresh browsing snapshot.
+  Reads are manual; there is no audit WebSocket or periodic polling.
+- Open an event for its identities, UTC time, outcome, proposal/entry hashes,
+  attempt ID, and selected details: reason(s), verification flag, stop level,
+  AI-off flag, replacement/rollback links, policy rule, and hourly bound. Full
+  proposals, parameters, AI context, provider attempts, plans, and rollback state
+  are omitted. Selected text is not secret detection; restrict access to the
+  journal and dashboard. Free-text detail fields are bounded in the projection.
+- Loading, empty results, and failures have separate messages. A failed refresh
+  keeps previous rows with a stale timestamp and marks current integrity as
+  **Not confirmed**. Pagination is disabled until a successful read. Sign-out
+  clears audit rows and event details.
+
+The endpoint accepts `limit` (1–100), `offset` (0–100,000), `through_sequence`,
+`actor`, `action_id`, `incident_id`, `event`, `status`, `since`, and `until`.
+Server reads are bounded to 100,000 events, 64 MB of stored payloads, 1 MB per
+payload, and a three-second processing budget (SQLite lock waits are capped at
+one second). Larger journals should be inspected through the controller CLI.
+Older schemas are never migrated by the dashboard; upgrade with the controller.
 
 ## Live feed
 
@@ -243,8 +300,10 @@ filters, empty results, evidence, untrusted text, stale data, reconnection,
 mobile overflow, and sign-out. Live feed checks also cover arrivals, filters,
 pause/resume, clear, bounded history, and gaps. Incidents checks cover recorded
 analysis, questions, stale analysis, absent/skipped/failed states, preserved drafts,
-and mobile investigation layout. Screenshots contain synthetic test
-incidents and events.
+and mobile investigation layout. Audit checks use a disposable journal and cover
+filters, stable pagination during appends, event details, integrity failure,
+unavailability, empty history, mobile layout, and sign-out. Screenshots contain
+synthetic test incidents, events, and audit entries.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,
 and includes Detection Engine tests and real query integration in the end-to-end job. Browser
 checks are optional and are not configured as a CI job.

@@ -1,11 +1,14 @@
 """Run browser checks against disposable local services; no external APIs."""
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -340,6 +343,135 @@ def check_live_feed(page, screenshots):
     expect(page.locator("#live-rows tr")).to_have_count(500)
 
 
+def append_audit(path, sequence):
+    payload = json.dumps(
+        {
+            "action_id": f"act_{sequence}",
+            "event": "outcome",
+            "actor": "executor",
+            "initiated_by": "alice",
+            "incident_id": f"incident-{sequence % 2}",
+            "type": "notify_operator",
+            "status": "dry_run",
+            "at": "2026-11-10T09:00:00Z",
+            "reason": '<img src=x onerror="window.untrustedExecuted=true">',
+            "proposal": {"params": {"token": "private-audit-parameter"}},
+            "state": {"secret": "private-audit-snapshot"},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, payload TEXT NOT NULL, previous_hash TEXT, entry_hash TEXT)"
+        )
+        row = db.execute(
+            "SELECT entry_hash FROM events ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        previous = row[0] if row else "0" * 64
+        digest = hashlib.sha256(
+            f"{sequence}\n{previous}\n{payload}".encode()
+        ).hexdigest()
+        db.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?)",
+            (sequence, payload, previous, digest),
+        )
+
+
+def check_audit_log(page, path, screenshots):
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.get_by_role("link", name="Audit log", exact=True).click()
+    expect(page.locator('[data-page="audit-log"]')).to_have_attribute(
+        "aria-current", "page"
+    )
+    expect(page.locator("#audit-rows tr")).to_have_count(20)
+    expect(page.locator("#audit-total")).to_have_text("23")
+    expect(page.locator("#audit-integrity")).to_have_text("Consistent")
+    assert page.evaluate("state.socket === null")
+    assert page.locator("#audit-rows tr").first.inner_text().startswith("#23")
+    append_audit(path, 24)
+    page.locator("#audit-next").click()
+    expect(page.locator("#audit-page")).to_have_text(
+        "21–23 of 23 matching entries · through sequence 23"
+    )
+    expect(page.locator("#audit-rows tr")).to_have_count(3)
+    page.locator("#audit-refresh").click()
+    expect(page.locator("#audit-total")).to_have_text("24")
+    expect(page.locator("#audit-rows tr").first).to_contain_text("#24")
+    page.locator("#audit-actor").fill("alice")
+    page.locator("#audit-action").fill("act_7")
+    page.locator("#audit-filters").get_by_role("button", name="Apply filters").click()
+    expect(page.locator("#audit-rows tr")).to_have_count(1)
+    page.locator("#audit-rows .incident-link").click()
+    expect(page.locator("#detail-content")).to_contain_text("act_7")
+    expect(page.locator("#detail-content")).to_contain_text("Previous entry hash")
+    expect(page.locator("#detail-content")).to_contain_text("<img src=x")
+    assert "private-audit" not in page.locator("#detail-content").inner_text()
+    assert page.locator("#detail-content img").count() == 0
+    page.keyboard.press("Escape")
+    expect(page.locator("#audit-action")).to_have_value("act_7")
+    expect(page.locator("#audit-rows tr")).to_have_count(1)
+    page.locator("#audit-actor").fill("nobody")
+    page.locator("#audit-filters").get_by_role("button", name="Apply filters").click()
+    expect(page.locator("#audit-notice")).to_have_text(
+        "No audit entries match these filters."
+    )
+    page.locator("#audit-filters").get_by_role("button", name="Reset filters").click()
+    expect(page.locator("#audit-rows tr")).to_have_count(20)
+    page.locator("#audit-limit").select_option("50")
+    page.locator("#audit-filters").get_by_role("button", name="Apply filters").click()
+    expect(page.locator("#audit-rows tr")).to_have_count(24)
+    with sqlite3.connect(path) as db:
+        original = db.execute(
+            "SELECT payload FROM events WHERE sequence = 1"
+        ).fetchone()[0]
+        db.execute("UPDATE events SET payload = '{}' WHERE sequence = 1")
+    page.locator("#audit-refresh").click()
+    expect(page.locator("#audit-notice")).to_contain_text(
+        "Audit integrity check failed"
+    )
+    expect(page.locator("#audit-notice")).to_contain_text("Showing stale rows")
+    expect(page.locator("#audit-integrity")).to_have_text("Not confirmed")
+    expect(page.locator("#audit-rows tr")).to_have_count(24)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE events SET payload = ? WHERE sequence = 1", (original,))
+    page.locator("#audit-refresh").click()
+    expect(page.locator("#audit-integrity")).to_have_text("Consistent")
+    moved = path.with_suffix(".unavailable")
+    path.rename(moved)
+    try:
+        page.locator("#audit-refresh").click()
+        expect(page.locator("#audit-notice")).to_contain_text(
+            "Audit journal is unavailable"
+        )
+        expect(page.locator("#audit-rows tr")).to_have_count(24)
+    finally:
+        moved.rename(path)
+    page.locator("#audit-refresh").click()
+    expect(page.locator("#audit-integrity")).to_have_text("Consistent")
+    if screenshots:
+        page.screenshot(path=str(screenshots / "audit-log-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.locator("#audit-rows .incident-link").first.click()
+    assert page.locator("#incident-dialog").evaluate(
+        "el => el.scrollWidth <= el.clientWidth"
+    )
+    if screenshots:
+        page.screenshot(
+            path=str(screenshots / "audit-detail-mobile.png"), full_page=True
+        )
+    page.keyboard.press("Escape")
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM events")
+    page.locator("#audit-refresh").click()
+    expect(page.locator("#audit-notice")).to_have_text(
+        "The controller journal has no recorded events yet."
+    )
+    expect(page.locator("#audit-total")).to_have_text("0")
+    assert page.evaluate("window.untrustedExecuted") is None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -353,7 +485,13 @@ def main():
         help="Optional directory for desktop and mobile screenshots",
     )
     args = parser.parse_args()
-    with ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as upstream:
+    with (
+        tempfile.TemporaryDirectory(prefix="bantis-audit-browser-") as audit_dir,
+        ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as upstream,
+    ):
+        audit_path = Path(audit_dir) / "reviews.sqlite3"
+        for sequence in range(1, 24):
+            append_audit(audit_path, sequence)
         thread = threading.Thread(target=upstream.serve_forever, daemon=True)
         thread.start()
         with socket.socket() as reservation:
@@ -367,6 +505,7 @@ def main():
             "DASHBOARD_ORIGIN": origin,
             "DETECTION_ENGINE_URL": f"http://127.0.0.1:{upstream.server_port}",
             "DASHBOARD_POLL_SECONDS": "1",
+            "DASHBOARD_AUDIT_PATH": str(audit_path),
             "COPILOT_API_URL": f"http://127.0.0.1:{upstream.server_port}",
             "COPILOT_API_TOKEN": "browser-fixture-copilot-token",
         }
@@ -488,14 +627,16 @@ def main():
                     )
                 check_incidents(page, args.screenshots)
                 check_live_feed(page, args.screenshots)
+                check_audit_log(page, audit_path, args.screenshots)
                 page.get_by_role("button", name="Sign out").click()
+                expect(page.locator("#audit-rows tr")).to_have_count(0)
                 expect(page.locator("#login-screen")).to_be_visible()
                 expect(page.locator("#incident-rows tr")).to_have_count(0)
                 expect(page.locator("#live-rows tr")).to_have_count(0)
                 assert not errors, errors
                 browser.close()
                 print(
-                    "PASS: dashboard, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    "PASS: dashboard, Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()

@@ -1,20 +1,22 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
 const isLiveFeed = location.pathname === "/live-feed";
 const connectionLabel = () => $(isLiveFeed ? "live-connection" : "connection-label");
 const live = { snapshot: null, displayed: [], paused: false, cleared: new Set(),
   clearedView: false, pauseTotal: null, gap: false, request: 0 };
-$("overview-content").hidden = isLiveFeed;
+$("overview-content").hidden = isLiveFeed || isAuditLog;
+$("audit-log-view").hidden = !isAuditLog;
 $("live-feed-view").hidden = !isLiveFeed;
-$("page-name").textContent = isLiveFeed ? "Live feed" : isIncidents ? "Incidents" : "Overview";
+$("page-name").textContent = isLiveFeed ? "Live feed" : isIncidents ? "Incidents" : isAuditLog ? "Audit log" : "Overview";
 if (isIncidents) {
   $("overview-title").textContent = "Incidents.";
   $("overview-subtitle").textContent = "Investigate correlated signals with evidence and recorded AI context.";
 }
-document.title = isLiveFeed ? "Bantis · Live feed" : isIncidents ? "Bantis · Incidents" : "Bantis · Security overview";
-document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : isIncidents ? "incidents" : "overview"}"]`).setAttribute("aria-current", "page");
+document.title = isLiveFeed ? "Bantis · Live feed" : isIncidents ? "Bantis · Incidents" : isAuditLog ? "Bantis · Audit log" : "Bantis · Security overview";
+document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : isIncidents ? "incidents" : isAuditLog ? "audit-log" : "overview"}"]`).setAttribute("aria-current", "page");
 const state = { offset: 0, limit: 20, total: 0, filters: {}, socket: null, retry: null,
   delay: 1000, active: false, listRequest: 0, detailRequest: 0, lastList: null, snapshot: null,
   listController: null, detailController: null, lastSequence: -1, listBusy: false };
@@ -52,6 +54,7 @@ function stopSocket() {
 function signedOut() {
   state.active = false;
   resetInvestigation();
+  resetAuditLog();
   stopSocket();
   state.listRequest++; state.detailRequest++;
   state.listController?.abort(); state.detailController?.abort();
@@ -174,6 +177,7 @@ async function activate() {
   state.active = true; state.delay = 1000;
   $("login-screen").hidden = true; $("workspace").hidden = false;
   $("login-error").textContent = "";
+  if (isAuditLog) { loadAuditLog(); return; }
   if (isLiveFeed) { refreshLiveFeed(); connect(); return; }
   loadIncidents(); connect();
   try { renderSnapshot(await api("/api/status")); } catch {}
@@ -473,4 +477,117 @@ $("live-filters").addEventListener("reset", () => {
   for (const id of ["event-level", "event-source", "event-type", "event-search"]) $(id).value = "";
   renderLiveEvents();
 });
+const auditLog = { offset: 0, limit: 20, total: 0, filters: {}, boundary: null, request: 0,
+  controller: null, lastLoaded: null, loadedOffset: 0, pageText: "", busy: false };
+function resetAuditLog() {
+  auditLog.request++; auditLog.controller?.abort();
+  auditLog.offset = 0; auditLog.total = 0; auditLog.boundary = null;
+  auditLog.lastLoaded = null; auditLog.busy = false; auditLog.pageText = ""; auditLog.loadedOffset = 0;
+  $("audit-rows").replaceChildren();
+  for (const id of ["audit-total", "audit-matching"]) $(id).textContent = "—";
+  $("audit-integrity").textContent = "Not checked";
+  $("audit-source").textContent = "Awaiting controller journal";
+  $("audit-observed").textContent = "No successful read yet";
+  $("audit-integrity-caption").textContent = "No integrity result available";
+  $("audit-page").textContent = "No audit data loaded";
+  $("audit-checkpoint").textContent = "Journal head: not read";
+  $("audit-notice").textContent = "Sign in to read the controller journal.";
+  $("audit-refresh").disabled = false;
+  $("audit-previous").disabled = true; $("audit-next").disabled = true;
+}
+function showAuditEntry(entry) {
+  resetInvestigation(); state.detailRequest++; state.detailController?.abort();
+  $("detail-kind").textContent = "AUDIT EVENT";
+  $("detail-title").textContent = `#${entry.sequence} · ${entry.event.replaceAll("_", " ")}`;
+  $("detail-notice").textContent = "Selected fields from the last successful journal read. Hashes describe the full original record; filtered rows need not be adjacent in the chain.";
+  const facts = node("dl");
+  for (const [label, value] of [["Sequence", entry.sequence], ["Recorded", time(entry.at)], ["Event", entry.event],
+    ["Action ID", entry.action_id], ["Action type", entry.type], ["Actor", entry.actor], ["Initiated by", entry.initiated_by],
+    ["Incident ID", entry.incident_id], ["Outcome", entry.status], ["Attempt ID", entry.attempt_id],
+    ["Proposal hash", entry.proposal_hash], ["Previous entry hash", entry.previous_hash], ["Entry hash", entry.entry_hash]]) {
+    facts.append(node("dt", label), node("dd", value ?? "Not recorded"));
+  }
+  $("detail-content").replaceChildren(facts, node("h3", "Selected details"),
+    node("pre", JSON.stringify(entry.details, null, 2), "event-details"));
+  if (!$("incident-dialog").open) $("incident-dialog").showModal();
+}
+async function loadAuditLog() {
+  let loaded = false;
+  const request = ++auditLog.request;
+  auditLog.controller?.abort(); auditLog.controller = new AbortController(); auditLog.busy = true;
+  $("audit-previous").disabled = true; $("audit-next").disabled = true;
+  $("audit-notice").className = "notice";
+  $("audit-notice").textContent = auditLog.lastLoaded ? "Refreshing audit entries…" : "Loading audit entries…";
+  const params = new URLSearchParams({ ...auditLog.filters, limit: auditLog.limit, offset: auditLog.offset });
+  if (auditLog.boundary !== null) params.set("through_sequence", auditLog.boundary);
+  try {
+    const page = await api(`/api/audit-log?${params}`, { signal: auditLog.controller.signal });
+    if (!state.active || request !== auditLog.request) return;
+    if (auditLog.offset > 0 && auditLog.offset >= page.total) {
+      auditLog.offset = Math.max(0, Math.floor((page.total - 1) / auditLog.limit) * auditLog.limit);
+      return loadAuditLog();
+    }
+    loaded = true;
+    auditLog.total = page.total; auditLog.boundary = page.through_sequence;
+    auditLog.lastLoaded = page.observed_at; auditLog.loadedOffset = page.offset;
+    $("audit-rows").replaceChildren(...page.items.map((entry) => {
+      const row = node("tr");
+      const recorded = node("td", `#${entry.sequence}`); recorded.append(node("span", time(entry.at), "pattern-label"));
+      const event = node("td"); const open = node("button", entry.event.replaceAll("_", " "), "incident-link");
+      open.type = "button"; open.addEventListener("click", () => showAuditEntry(entry));
+      event.append(open, node("span", `${entry.type || "Action"} · ${entry.action_id}`, "pattern-label"));
+      const actor = node("td", entry.actor); if (entry.initiated_by) actor.append(node("span", `Initiated by ${entry.initiated_by}`, "pattern-label"));
+      const outcome = node("td"); outcome.append(node("span", entry.status ? entry.status.replaceAll("_", " ") : "Not recorded", "pill neutral"));
+      row.append(recorded, event, actor, node("td", entry.incident_id || "Not recorded"), outcome);
+      return row;
+    }));
+    $("audit-total").textContent = String(page.journal_total);
+    $("audit-matching").textContent = String(page.total);
+    $("audit-integrity").textContent = "Consistent";
+    $("audit-integrity-caption").textContent = "Local event chain only · no external anchor";
+    $("audit-source").textContent = "Controller journal available · manual refresh";
+    $("audit-checkpoint").textContent = `Snapshot head: ${page.head}`;
+    $("audit-observed").textContent = `Last read ${time(page.observed_at)}`;
+    auditLog.pageText = page.total ? `${page.offset + 1}–${page.offset + page.items.length} of ${page.total} matching entries · through sequence ${page.through_sequence}` : "0 matching entries";
+    $("audit-page").textContent = auditLog.pageText;
+    $("audit-notice").textContent = page.total ? "Newest sequence first. Open an event to inspect its selected fields." : page.journal_total ? "No audit entries match these filters." : "The controller journal has no recorded events yet.";
+  } catch (error) {
+    if (!state.active || request !== auditLog.request || error.name === "AbortError") return;
+    $("audit-source").textContent = "Controller journal unavailable";
+    $("audit-integrity").textContent = "Not confirmed";
+    $("audit-integrity-caption").textContent = "Current integrity could not be confirmed";
+    $("audit-notice").className = "notice error";
+    $("audit-notice").textContent = `${error.message}.${auditLog.lastLoaded ? ` Showing stale rows from ${time(auditLog.lastLoaded)}; they may belong to previous filters or a previous page.` : " No audit data loaded."}`;
+    $("audit-page").textContent = auditLog.lastLoaded ? `${auditLog.pageText} · stale` : "No audit data loaded";
+    auditLog.offset = auditLog.loadedOffset;
+  } finally {
+    if (request === auditLog.request && state.active) {
+      auditLog.busy = false;
+      $("audit-previous").disabled = !loaded || auditLog.offset === 0;
+      $("audit-next").disabled = !loaded || !auditLog.lastLoaded || auditLog.offset + auditLog.limit >= auditLog.total;
+    }
+  }
+}
+$("audit-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const filters = {};
+  for (const [id, key] of [["audit-event", "event"], ["audit-actor", "actor"], ["audit-action", "action_id"], ["audit-incident", "incident_id"], ["audit-status", "status"]]) {
+    if ($(id).value.trim()) filters[key] = $(id).value.trim();
+  }
+  for (const [id, key] of [["audit-since", "since"], ["audit-until", "until"]]) {
+    if ($(id).value) filters[key] = new Date(`${$(id).value}Z`).toISOString();
+  }
+  if (filters.since && filters.until && filters.since > filters.until) {
+    $("audit-notice").textContent = "Start time must be before end time. Filters were not applied."; return;
+  }
+  auditLog.filters = filters; auditLog.offset = 0; auditLog.boundary = null;
+  auditLog.limit = Number($("audit-limit").value); loadAuditLog();
+});
+$("audit-filters").addEventListener("reset", () => {
+  auditLog.filters = {}; auditLog.offset = 0; auditLog.limit = 20; auditLog.boundary = null; loadAuditLog();
+});
+$("audit-refresh").addEventListener("click", () => { auditLog.boundary = null; auditLog.offset = 0; loadAuditLog(); });
+$("audit-previous").addEventListener("click", () => { auditLog.offset = Math.max(0, auditLog.offset - auditLog.limit); loadAuditLog(); });
+$("audit-next").addEventListener("click", () => { auditLog.offset += auditLog.limit; loadAuditLog(); });
+
 (async () => { try { await api("/api/session"); await activate(); } catch {} })();

@@ -5,7 +5,8 @@
 This document defines the UI requirements supported by the current Bantis
 contracts. The [dashboard foundation](../dashboard/README.md) now provides an
 initial interface, local dashboard sessions, read-only incident access, selected
-evidence, recorded Copilot analysis, follow-up questions, and periodic WebSocket status updates. Wizard setup authentication and
+evidence, recorded Copilot analysis, follow-up questions, a read-only controller Audit log,
+and periodic WebSocket status updates. Wizard setup authentication and
 browser response approval remain unimplemented. All interface copy and
 documentation must be in English.
 
@@ -128,7 +129,8 @@ resume and approval invalidation remain unimplemented.
 | Recorded initial analysis | Copilot authenticated `GET /incidents/{id}/analysis` through the dashboard session boundary | Implemented with selected fields; transient deferral and provider-outage reasons are not persisted, so absent analysis is explicitly uncertain. The SQLite file is not exposed to the browser. |
 | Follow-up conversation | Copilot `GET` and `POST /incidents/{id}/questions` | Dashboard session integration is implemented; service bearer tokens stay server-side. See [Copilot guide](../ai-copilot/README.md). |
 | Setup and administrator | No setup backend | Define first-run locking, credentials, configuration persistence, and session lifecycle. |
-| Response state, review, audit, stop, rollback | Local controller CLI and journal | Define authenticated HTTP contracts and preserve [controller guarantees](response-controller-security.md). |
+| Audit history | Session-protected dashboard `GET /api/audit-log` reads a configured local controller journal in read-only mode | Implemented with full-chain local verification, selected fields, exact filters, and pagination; independent anchoring remains open. |
+| Response state, review, stop, rollback | Local controller CLI and journal | Define authenticated HTTP contracts and preserve [controller guarantees](response-controller-security.md). |
 | Evaluation metrics | Local scorecard generator | Define evaluation result retrieval and provenance before displaying metrics. |
 
 Detection routes currently have no authentication. Do not expose them beyond

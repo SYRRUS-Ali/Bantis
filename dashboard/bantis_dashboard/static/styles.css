@@ -750,3 +750,13 @@ textarea:focus-visible { outline: 3px solid #2f7c91; outline-offset: 3px; }
 @media(max-width:900px) { .investigating .investigation-grid { grid-template-columns: minmax(0, 1fr); } }
 dialog { overflow-wrap: anywhere; }
 .investigation-grid > * { min-width: 0; }
+#audit-rows td { max-width: 300px; overflow-wrap: anywhere; }
+#audit-rows td:last-child { white-space: normal; }
+#audit-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#audit-filters > div { min-width: 0; }
+@media(max-width:1100px) { #audit-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media(max-width:760px) {
+  #audit-filters { grid-template-columns: minmax(0, 1fr); }
+  .sidebar nav { flex-wrap: wrap; }
+}
+.audit-checkpoint { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: .72rem; }

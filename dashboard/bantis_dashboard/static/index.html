@@ -30,9 +30,10 @@
       <a href="/" class="brand"><span class="brand-mark" aria-hidden="true">B</span> bantis<span class="brand-dot">.</span></a>
       <p class="nav-label">WORKSPACE</p>
       <nav aria-label="Main navigation">
-        <a href="/" class="nav-item" data-page="overview">Overview <span>↗</span></a>
-        <a href="/live-feed" class="nav-item" data-page="live-feed">Live feed <span>◉</span></a>
-        <a href="/incidents" class="nav-item" data-page="incidents">Incidents <span>≡</span></a>
+        <a href="/" class="nav-item" data-page="overview">Overview <span aria-hidden="true">↗</span></a>
+        <a href="/live-feed" class="nav-item" data-page="live-feed">Live feed <span aria-hidden="true">◉</span></a>
+        <a href="/incidents" class="nav-item" data-page="incidents">Incidents <span aria-hidden="true">≡</span></a>
+        <a href="/audit-log" class="nav-item" data-page="audit-log">Audit log <span aria-hidden="true">↳</span></a>
       </nav>
       <div class="sidebar-note"><span class="small-dot"></span> LOCAL OPERATIONS<p>One environment.<br>Evidence first.</p></div>
       <button id="sign-out" class="sign-out">Sign out <span aria-hidden="true">↗</span></button>
@@ -67,7 +68,7 @@
         <div class="pagination"><span id="page-label">No data loaded</span><div><button id="previous" class="secondary" disabled>← Previous</button><button id="next" class="secondary" disabled>Next →</button></div></div>
       </section>
 
-      <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Open an incident to review its recorded AI analysis and ask follow-up questions. Response approvals, audit history, and emergency controls are not connected to this interface. Use the local Response Controller CLI for supported response operations.</p></div></section>
+      <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Open an incident to review its recorded AI analysis and ask follow-up questions. Controller audit history is available in Audit log. Response approvals and emergency controls remain in the local CLI. Use the local Response Controller CLI for supported response operations.</p></div></section>
       </div>
 
       <section id="live-feed-view" hidden aria-labelledby="live-title">
@@ -96,6 +97,37 @@
           <div class="pagination"><span id="live-window">No event data loaded</span><span id="live-pending" aria-live="polite"></span></div>
         </div>
         <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Inspect the signal. Keep its context.</h2><p>Pausing freezes this display while updates continue to arrive. Clearing only resets this view. Raw messages and tool output are omitted; selected fields are available in event details.</p></div></section>
+      </section>
+      <section id="audit-log-view" hidden aria-labelledby="audit-title">
+        <div class="page-heading">
+          <div><p class="eyebrow">ACCOUNTABILITY</p><h1 id="audit-title">Audit log<span class="title-dot">.</span></h1><p class="subtitle">Trace recorded controller decisions, attempts, and outcomes.</p></div>
+          <button id="audit-refresh" class="secondary">Refresh log <span aria-hidden="true">↻</span></button>
+        </div>
+        <div class="connection-bar" role="status" aria-live="polite"><span id="audit-source">Awaiting controller journal</span><span id="audit-observed">No successful read yet</span></div>
+        <section class="metrics" aria-label="Audit journal status">
+          <article class="metric"><p class="metric-label">JOURNAL ENTRIES</p><strong id="audit-total">—</strong><p>Across the controller journal</p></article>
+          <article class="metric"><p class="metric-label">MATCHING ENTRIES</p><strong id="audit-matching">—</strong><p>Within this browsing snapshot</p></article>
+          <article class="metric"><p class="metric-label">LOCAL CHAIN CHECK</p><strong id="audit-integrity" class="word-value">Not checked</strong><p id="audit-integrity-caption">No integrity result available</p></article>
+        </section>
+        <div class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">RESPONSE CONTROLLER JOURNAL</p><h2>Recorded activity</h2></div><span class="pill neutral">READ ONLY</span></div>
+          <form id="audit-filters" class="filters">
+            <div><label for="audit-event">Event (exact match)</label><input id="audit-event" maxlength="200" placeholder="e.g. outcome"></div>
+            <div><label for="audit-actor">Actor or initiator (exact match)</label><input id="audit-actor" maxlength="512" placeholder="Any identity"></div>
+            <div><label for="audit-action">Action ID (exact match)</label><input id="audit-action" maxlength="512" placeholder="Any action"></div>
+            <div><label for="audit-incident">Incident ID (exact match)</label><input id="audit-incident" maxlength="512" placeholder="Any incident"></div>
+            <div><label for="audit-status">Outcome (exact match)</label><input id="audit-status" maxlength="200" placeholder="e.g. dry_run"></div>
+            <div><label for="audit-since">From (UTC)</label><input id="audit-since" type="datetime-local"></div>
+            <div><label for="audit-until">Through (UTC)</label><input id="audit-until" type="datetime-local"></div>
+            <div><label for="audit-limit">Entries per page</label><select id="audit-limit"><option>20</option><option>50</option><option>100</option></select></div>
+            <button type="submit" class="secondary">Apply filters</button><button type="reset" class="text-button">Reset filters</button>
+          </form>
+          <p id="audit-checkpoint" class="notice audit-checkpoint">Journal head: not read</p>
+          <p id="audit-notice" class="notice" role="status" aria-live="polite">Loading audit entries…</p>
+          <div class="table-scroll"><table><caption class="sr-only">Audit events, newest sequence first. Open an event for selected details and chain hashes.</caption><thead><tr><th scope="col">Sequence / time (UTC)</th><th scope="col">Event / action</th><th scope="col">Actor / initiator</th><th scope="col">Incident</th><th scope="col">Outcome</th></tr></thead><tbody id="audit-rows"></tbody></table></div>
+          <div class="pagination"><span id="audit-page">No audit data loaded</span><div><button id="audit-previous" class="secondary" disabled>← Previous</button><button id="audit-next" class="secondary" disabled>Next →</button></div></div>
+        </div>
+        <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>A local record of what happened.</h2><p>Each read checks the complete event chain within one database snapshot. A consistent chain is not independently anchored evidence and cannot detect a rebuilt journal or valid tail deletion. Entries use selected fields; full proposals, parameters, provider output, and rollback snapshots are omitted. Refresh to include new entries; browsing keeps a fixed sequence boundary.</p></div></section>
       </section>
       <footer>BANTIS <span>Self-hosted security operations · All times in UTC</span></footer>
     </main>
