@@ -1,6 +1,7 @@
 import math
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -31,6 +32,7 @@ class Settings:
     session_seconds: int = 28800
     copilot_url: str = "http://127.0.0.1:8100"
     copilot_token: str = field(default="", repr=False)
+    audit_path: Path | None = None
 
     def __post_init__(self):
         if not 32 <= len(self.token.encode()) <= 512:
@@ -59,6 +61,9 @@ class Settings:
             detection_url=os.environ.get(
                 "DETECTION_ENGINE_URL", "http://127.0.0.1:8000"
             ),
+            audit_path=Path(os.environ["DASHBOARD_AUDIT_PATH"])
+            if os.environ.get("DASHBOARD_AUDIT_PATH")
+            else None,
             copilot_url=os.environ.get("COPILOT_API_URL", "http://127.0.0.1:8100"),
             copilot_token=os.environ.get("COPILOT_API_TOKEN", ""),
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),

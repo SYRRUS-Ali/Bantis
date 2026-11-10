@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .audit import AuditPage, AuditReader
 from .config import Settings
 from .copilot import CopilotClient, Question
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
@@ -104,6 +105,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
+    audit_reader = AuditReader(settings.audit_path)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -229,6 +231,42 @@ def create_app(
         return request.app.state.live_feed.snapshot
 
     @app.get(
+        "/api/audit-log",
+        response_model=AuditPage,
+        dependencies=[Depends(authenticated)],
+    )
+    def audit_log(
+        actor: str | None = Query(default=None, max_length=512),
+        action_id: str | None = Query(default=None, max_length=512),
+        incident_id: str | None = Query(default=None, max_length=512),
+        event: str | None = Query(default=None, max_length=200),
+        status: str | None = Query(default=None, max_length=200),
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+        through_sequence: int | None = Query(default=None, ge=0),
+    ):
+        if since is not None:
+            since = Incident.utc_time(since)
+        if until is not None:
+            until = Incident.utc_time(until)
+        if since and until and since > until:
+            raise HTTPException(422, "Start time must be before end time")
+        return audit_reader.page(
+            limit=limit,
+            offset=offset,
+            through_sequence=through_sequence,
+            since=since,
+            until=until,
+            actor=actor,
+            action_id=action_id,
+            incident_id=incident_id,
+            event=event,
+            status=status,
+        )
+
+    @app.get(
         "/api/incidents",
         response_model=IncidentPage,
         dependencies=[Depends(authenticated)],
@@ -344,6 +382,7 @@ def create_app(
     @app.get("/", include_in_schema=False)
     @app.get("/live-feed", include_in_schema=False)
     @app.get("/incidents", include_in_schema=False)
+    @app.get("/audit-log", include_in_schema=False)
     async def index():
         return FileResponse(STATIC / "index.html")
 
