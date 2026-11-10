@@ -29,12 +29,23 @@ class Settings:
     detection_url: str = "http://127.0.0.1:8000"
     poll_seconds: float = 5.0
     session_seconds: int = 28800
+    copilot_url: str = "http://127.0.0.1:8100"
+    copilot_token: str = field(default="", repr=False)
 
     def __post_init__(self):
         if not 32 <= len(self.token.encode()) <= 512:
             raise ValueError("DASHBOARD_TOKEN must contain 32–512 bytes")
         object.__setattr__(self, "origin", validate_url(self.origin, origin=True))
         object.__setattr__(self, "detection_url", validate_url(self.detection_url))
+        object.__setattr__(self, "copilot_url", validate_url(self.copilot_url))
+        if self.copilot_token and (
+            len(self.copilot_token) < 16
+            or not self.copilot_token.isascii()
+            or any(c.isspace() for c in self.copilot_token)
+        ):
+            raise ValueError(
+                "COPILOT_API_TOKEN must be at least 16 ASCII characters without whitespace"
+            )
         if not math.isfinite(self.poll_seconds) or not 1 <= self.poll_seconds <= 300:
             raise ValueError("DASHBOARD_POLL_SECONDS must be between 1 and 300")
         if not 1 <= self.session_seconds <= 28800:
@@ -48,5 +59,7 @@ class Settings:
             detection_url=os.environ.get(
                 "DETECTION_ENGINE_URL", "http://127.0.0.1:8000"
             ),
+            copilot_url=os.environ.get("COPILOT_API_URL", "http://127.0.0.1:8100"),
+            copilot_token=os.environ.get("COPILOT_API_TOKEN", ""),
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),
         )

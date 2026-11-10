@@ -1,18 +1,37 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const isIncidents = location.pathname === "/incidents";
 const isLiveFeed = location.pathname === "/live-feed";
 const connectionLabel = () => $(isLiveFeed ? "live-connection" : "connection-label");
 const live = { snapshot: null, displayed: [], paused: false, cleared: new Set(),
   clearedView: false, pauseTotal: null, gap: false, request: 0 };
 $("overview-content").hidden = isLiveFeed;
 $("live-feed-view").hidden = !isLiveFeed;
-$("page-name").textContent = isLiveFeed ? "Live feed" : "Overview";
-document.title = isLiveFeed ? "Bantis · Live feed" : "Bantis · Security overview";
-document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : "overview"}"]`).setAttribute("aria-current", "page");
+$("page-name").textContent = isLiveFeed ? "Live feed" : isIncidents ? "Incidents" : "Overview";
+if (isIncidents) {
+  $("overview-title").textContent = "Incidents.";
+  $("overview-subtitle").textContent = "Investigate correlated signals with evidence and recorded AI context.";
+}
+document.title = isLiveFeed ? "Bantis · Live feed" : isIncidents ? "Bantis · Incidents" : "Bantis · Security overview";
+document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : isIncidents ? "incidents" : "overview"}"]`).setAttribute("aria-current", "page");
 const state = { offset: 0, limit: 20, total: 0, filters: {}, socket: null, retry: null,
   delay: 1000, active: false, listRequest: 0, detailRequest: 0, lastList: null, snapshot: null,
   listController: null, detailController: null, lastSequence: -1, listBusy: false };
+
+const investigation = { id: null, request: 0, controller: null, canAsk: false, asking: false, lastLoaded: null };
+
+function resetInvestigation() {
+  investigation.request++; investigation.controller?.abort();
+  investigation.id = null; investigation.canAsk = false; investigation.asking = false; investigation.lastLoaded = null;
+  $("analysis-panel").hidden = true;
+  $("analysis-content").replaceChildren(); $("conversation").replaceChildren();
+  $("analysis-notice").textContent = ""; $("conversation-notice").textContent = "";
+  $("question").value = ""; $("question").disabled = true;
+  $("ask-question").disabled = true; $("ask-question").textContent = "Send question";
+  $("analysis-refresh").disabled = false;
+  $("incident-dialog").classList.remove("investigating");
+}
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -32,6 +51,7 @@ function stopSocket() {
 }
 function signedOut() {
   state.active = false;
+  resetInvestigation();
   stopSocket();
   state.listRequest++; state.detailRequest++;
   state.listController?.abort(); state.detailController?.abort();
@@ -159,6 +179,10 @@ async function activate() {
   try { renderSnapshot(await api("/api/status")); } catch {}
 }
 async function showIncident(id) {
+  resetInvestigation();
+  investigation.id = id;
+  $("analysis-panel").hidden = false;
+  $("incident-dialog").classList.add("investigating");
   const request = ++state.detailRequest;
   state.detailController?.abort(); state.detailController = new AbortController();
   const options = { signal: state.detailController.signal };
@@ -170,6 +194,7 @@ async function showIncident(id) {
     const incident = await api(`/api/incidents/${encodeURIComponent(id)}`, options);
     if (request !== state.detailRequest || !state.active) return;
     $("detail-title").textContent = incident.summary;
+    loadAnalysis();
     const facts = node("dl");
     for (const [label, value] of [["Incident ID", incident.incident_id], ["Severity", incident.severity],
       ["Pattern", incident.pattern], ["Created", time(incident.created_at)],
@@ -187,11 +212,123 @@ async function showIncident(id) {
       $("detail-content").append(entry);
     }
     if (!events.length) $("detail-content").append(node("p", "No correlated evidence returned."));
-    $("detail-notice").textContent = "Selected evidence fields are shown. Raw messages and tool output are omitted. Copilot analysis is not connected.";
+    $("detail-notice").textContent = "Selected evidence fields are shown. Raw messages and tool output are omitted.";
   } catch (error) {
     if (request === state.detailRequest && error.name !== "AbortError" && state.active) $("detail-notice").textContent = error.message;
   }
 }
+function renderAnalysis(record) {
+  const content = $("analysis-content"); content.replaceChildren();
+  const labels = { analyzed: "Analysis recorded", skipped: "Analysis skipped", failed: "Stored analysis failed", not_recorded: "No analysis recorded" };
+  content.append(node("p", labels[record.status], "pill neutral"));
+  if (record.status === "not_recorded") {
+    content.append(node("p", "No decision is recorded yet. Pending work, deferral, and provider outages cannot be distinguished from this record. Refresh to check again."));
+  }
+  if (record.note) content.append(node("p", record.note, "analysis-text"));
+  if (record.recorded_at) {
+    const facts = node("dl");
+    for (const [label, value] of [["Recorded", time(record.recorded_at)], ["Record ID", record.record_id], ["Model", record.model], ["Outcome", record.outcome]]) {
+      facts.append(node("dt", label), node("dd", value || "Unavailable"));
+    }
+    content.append(facts);
+  }
+  if (record.analysis) {
+    const analysis = record.analysis;
+    content.append(node("h3", "Reasoning"), node("p", analysis.reasoning, "analysis-text"));
+    const facts = node("dl");
+    facts.append(node("dt", "AI confidence"), node("dd", `${Math.round(analysis.confidence * 100)}% · separate from detection confidence`),
+      node("dt", "Generated"), node("dd", time(analysis.generated_at)), node("dt", "Analysis model"), node("dd", analysis.model));
+    content.append(facts, node("h3", "Recommendation"), node("p", analysis.proposed_action.type.replaceAll("_", " "), "pill neutral"),
+      node("p", analysis.proposed_action.description, "analysis-text"));
+  }
+}
+function renderConversation(records) {
+  $("conversation").replaceChildren(...records.map((record) => {
+    const entry = node("article", undefined, "conversation-entry");
+    entry.append(node("p", `${time(record.asked_at)} · ${record.model}`, "fine-print"),
+      node("h4", "Question"), node("p", record.question, "analysis-text"), node("h4", "Answer"), node("p", record.answer, "analysis-text"));
+    return entry;
+  }));
+}
+async function loadAnalysis() {
+  if (!investigation.id || investigation.asking) return;
+  const id = investigation.id;
+  const request = ++investigation.request;
+  investigation.controller?.abort(); investigation.controller = new AbortController();
+  const options = { signal: investigation.controller.signal };
+  const current = () => state.active && investigation.id === id && investigation.request === request;
+  investigation.canAsk = false; $("ask-question").disabled = true; $("question").disabled = true;
+  $("analysis-refresh").disabled = true;
+  $("analysis-notice").textContent = "Loading recorded analysis…";
+  $("conversation-notice").textContent = "Waiting for analysis…";
+  try {
+    const record = await api(`/api/incidents/${encodeURIComponent(id)}/analysis`, options);
+    if (!current()) return;
+    renderAnalysis(record);
+    investigation.lastLoaded = new Date().toISOString();
+    $("analysis-notice").textContent = `Last loaded ${time(investigation.lastLoaded)}`;
+    if (record.status === "not_recorded") {
+      $("conversation").replaceChildren();
+      $("conversation-notice").textContent = "Questions require a successful recorded analysis.";
+      return;
+    }
+    $("conversation-notice").textContent = "Loading conversation…";
+    try {
+      const records = await api(`/api/incidents/${encodeURIComponent(id)}/questions`, options);
+      if (!current()) return;
+      renderConversation(records);
+      $("conversation-notice").textContent = records.length ? `${records.length} recorded ${records.length === 1 ? "reply" : "replies"}` : "No follow-up questions yet.";
+      investigation.canAsk = record.status === "analyzed" && record.can_ask;
+      if (!investigation.canAsk) $("conversation-notice").textContent += " Questions require a successful recorded analysis.";
+    } catch (error) {
+      if (current() && error.name !== "AbortError") $("conversation-notice").textContent = `${error.message} Displayed conversation may be stale. Refresh before asking again.`;
+    }
+  } catch (error) {
+    if (current() && error.name !== "AbortError") {
+      $("analysis-notice").textContent = `${error.message}.${investigation.lastLoaded ? ` Showing stale analysis loaded ${time(investigation.lastLoaded)}.` : " No analysis loaded."}`;
+      $("conversation-notice").textContent = "Conversation unavailable. Refresh analysis to reconnect.";
+    }
+  } finally {
+    if (current()) {
+      $("analysis-refresh").disabled = false;
+      $("question").disabled = !investigation.canAsk;
+      $("ask-question").disabled = !investigation.canAsk;
+    }
+  }
+}
+$("analysis-refresh").addEventListener("click", loadAnalysis);
+$("question-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const question = $("question").value.trim();
+  if (!question || !investigation.canAsk || investigation.asking) return;
+  const id = investigation.id, request = investigation.request;
+  investigation.asking = true;
+  $("ask-question").disabled = true; $("question").disabled = true; $("analysis-refresh").disabled = true;
+  $("ask-question").textContent = "Waiting for reply…";
+  $("conversation-notice").textContent = "Sending question. The provider may take a moment…";
+  try {
+    await api(`/api/incidents/${encodeURIComponent(id)}/questions`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }),
+      signal: investigation.controller.signal,
+    });
+    if (investigation.id !== id || investigation.request !== request || !state.active) return;
+    $("question").value = "";
+    investigation.asking = false;
+    await loadAnalysis();
+  } catch (error) {
+    if (investigation.id !== id || investigation.request !== request || !state.active) return;
+    investigation.canAsk = false;
+    $("conversation-notice").textContent = `${error.message} Refresh the conversation before retrying; the question may already have been recorded.`;
+  } finally {
+    if (investigation.id === id && investigation.request === request && state.active) {
+      investigation.asking = false;
+      $("analysis-refresh").disabled = false;
+      $("ask-question").disabled = !investigation.canAsk; $("question").disabled = !investigation.canAsk;
+    }
+    if (investigation.id === id) $("ask-question").textContent = "Send question";
+  }
+});
+
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.target.querySelector("button"); button.disabled = true;
@@ -221,7 +358,7 @@ $("refresh").addEventListener("click", async () => {
   try { renderSnapshot(await api("/api/status")); } catch (error) { if (state.active) $("connection-label").textContent = error.message; }
 });
 $("close-detail").addEventListener("click", () => $("incident-dialog").close());
-$("incident-dialog").addEventListener("close", () => { state.detailRequest++; state.detailController?.abort(); });
+$("incident-dialog").addEventListener("close", () => { state.detailRequest++; state.detailController?.abort(); resetInvestigation(); });
 
 function renderLiveSnapshot(snapshot) {
   if (!state.active) return;
@@ -301,6 +438,7 @@ async function refreshLiveFeed() {
 }
 
 function showLiveEvent(event) {
+  resetInvestigation();
   state.detailRequest++; state.detailController?.abort();
   $("detail-kind").textContent = "EVENT INSPECTION";
   $("detail-title").textContent = event.event_type;

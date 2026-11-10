@@ -32,7 +32,7 @@
       <nav aria-label="Main navigation">
         <a href="/" class="nav-item" data-page="overview">Overview <span>↗</span></a>
         <a href="/live-feed" class="nav-item" data-page="live-feed">Live feed <span>◉</span></a>
-        <a href="/#incidents" class="nav-item">Incidents <span>≡</span></a>
+        <a href="/incidents" class="nav-item" data-page="incidents">Incidents <span>≡</span></a>
       </nav>
       <div class="sidebar-note"><span class="small-dot"></span> LOCAL OPERATIONS<p>One environment.<br>Evidence first.</p></div>
       <button id="sign-out" class="sign-out">Sign out <span aria-hidden="true">↗</span></button>
@@ -42,7 +42,7 @@
       <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="page-name">Overview</span></span><span class="pill neutral">READ ONLY</span></header>
       <div id="overview-content">
       <section class="page-heading">
-        <div><p class="eyebrow">SECURITY OPERATIONS</p><h1>Environment overview<span class="title-dot">.</span></h1><p class="subtitle">Follow the signals. Inspect the evidence. Stay in control.</p></div>
+        <div><p class="eyebrow">SECURITY OPERATIONS</p><h1 id="overview-title">Environment overview<span class="title-dot">.</span></h1><p id="overview-subtitle" class="subtitle">Follow the signals. Inspect the evidence. Stay in control.</p></div>
         <button id="refresh" class="secondary">Refresh data <span aria-hidden="true">↻</span></button>
       </section>
       <div class="connection-bar" role="status" aria-live="polite"><span id="connection-label">Connecting to live updates…</span><span id="last-refresh">Awaiting first observation</span></div>
@@ -67,7 +67,7 @@
         <div class="pagination"><span id="page-label">No data loaded</span><div><button id="previous" class="secondary" disabled>← Previous</button><button id="next" class="secondary" disabled>Next →</button></div></div>
       </section>
 
-      <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Copilot analysis, response approvals, audit history, and emergency controls are not connected to this interface yet. Use the local Response Controller CLI for supported response operations.</p></div></section>
+      <section class="capability-note"><span aria-hidden="true">↳</span><div><h2>Investigation starts with evidence.</h2><p>Open an incident to review its recorded AI analysis and ask follow-up questions. Response approvals, audit history, and emergency controls are not connected to this interface. Use the local Response Controller CLI for supported response operations.</p></div></section>
       </div>
 
       <section id="live-feed-view" hidden aria-labelledby="live-title">
@@ -105,7 +105,24 @@
     <div class="detail-heading"><p id="detail-kind" class="eyebrow">INCIDENT INVESTIGATION</p><button id="close-detail" class="secondary">Close ×</button></div>
     <h2 id="detail-title">Incident detail</h2>
     <p id="detail-notice" role="status" aria-live="polite"></p>
-    <div id="detail-content"></div>
+    <div class="investigation-grid">
+      <section id="detail-content" aria-label="Incident facts and evidence"></section>
+      <section id="analysis-panel" class="analysis-panel" aria-labelledby="analysis-title" hidden>
+        <div class="detail-heading"><div><p class="eyebrow">COPILOT CONTEXT</p><h2 id="analysis-title">AI analysis</h2></div><button id="analysis-refresh" class="secondary" type="button">Refresh analysis</button></div>
+        <p class="analysis-boundary">Recommendations only. Questions and replies do not execute response actions.</p>
+        <p id="analysis-notice" role="status" aria-live="polite"></p>
+        <div id="analysis-content"></div>
+        <h3>Follow-up conversation</h3>
+        <p id="conversation-notice" role="status" aria-live="polite"></p>
+        <div id="conversation"></div>
+        <form id="question-form">
+          <label for="question">Ask about this incident</label>
+          <textarea id="question" rows="3" required maxlength="2000" placeholder="What evidence supports this recommendation?" aria-describedby="question-help" disabled></textarea>
+          <p id="question-help" class="fine-print">Up to 2,000 characters. Do not include credentials. Questions are sent to the configured provider and use its token budget.</p>
+          <button id="ask-question" class="primary" type="submit" disabled>Send question</button>
+        </form>
+      </section>
+    </div>
   </dialog>
 </body>
 </html>

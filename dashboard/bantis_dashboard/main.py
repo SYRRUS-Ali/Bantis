@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
+from .copilot import CopilotClient, Question
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
 from .live_feed import LiveFeed
 
@@ -98,19 +99,35 @@ class StatusFeed:
             await asyncio.sleep(self.interval)
 
 
-def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, transport=None, copilot_transport=None
+) -> FastAPI:
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
 
     @asynccontextmanager
     async def lifespan(app):
-        async with httpx.AsyncClient(
-            base_url=settings.detection_url + "/",
-            timeout=3.0,
-            follow_redirects=False,
-            trust_env=False,
-            transport=transport,
-        ) as client:
+        async with (
+            httpx.AsyncClient(
+                base_url=settings.detection_url + "/",
+                timeout=3.0,
+                follow_redirects=False,
+                trust_env=False,
+                transport=transport,
+            ) as client,
+            httpx.AsyncClient(
+                base_url=settings.copilot_url + "/",
+                headers={"Authorization": f"Bearer {settings.copilot_token}"}
+                if settings.copilot_token
+                else {},
+                follow_redirects=False,
+                trust_env=False,
+                transport=copilot_transport,
+            ) as copilot_client,
+        ):
+            app.state.copilot = CopilotClient(
+                copilot_client, bool(settings.copilot_token)
+            )
             app.state.detection = DetectionClient(client)
             app.state.feed = StatusFeed(app.state.detection, settings.poll_seconds)
             app.state.live_feed = LiveFeed(app.state.detection, settings.poll_seconds)
@@ -247,6 +264,29 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
     async def evidence(request: Request, incident_id: str):
         return await request.app.state.detection.evidence(incident_id)
 
+    @app.get(
+        "/api/incidents/{incident_id}/analysis", dependencies=[Depends(authenticated)]
+    )
+    async def analysis(request: Request, incident_id: str):
+        await request.app.state.detection.incident(incident_id)
+        return await request.app.state.copilot.request(incident_id, "analysis")
+
+    @app.get(
+        "/api/incidents/{incident_id}/questions", dependencies=[Depends(authenticated)]
+    )
+    async def questions(request: Request, incident_id: str):
+        await request.app.state.detection.incident(incident_id)
+        return await request.app.state.copilot.request(incident_id, "questions")
+
+    @app.post(
+        "/api/incidents/{incident_id}/questions",
+        status_code=201,
+        dependencies=[Depends(authenticated), Depends(same_origin)],
+    )
+    async def ask(request: Request, incident_id: str, body: Question):
+        await request.app.state.detection.incident(incident_id)
+        return await request.app.state.copilot.request(incident_id, "questions", body)
+
     @app.websocket("/ws")
     @app.websocket("/ws/events")
     async def websocket(websocket: WebSocket):
@@ -303,6 +343,7 @@ def create_app(settings: Settings | None = None, *, transport=None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     @app.get("/live-feed", include_in_schema=False)
+    @app.get("/incidents", include_in_schema=False)
     async def index():
         return FileResponse(STATIC / "index.html")
 
