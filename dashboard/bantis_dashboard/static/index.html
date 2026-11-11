@@ -155,6 +155,12 @@
         </form>
       </section>
     </div>
+    <section id="response-panel" class="analysis-panel" aria-labelledby="response-title" hidden>
+      <div class="detail-heading"><h2 id="response-title">Response review</h2><button id="response-refresh" class="secondary" type="button">Refresh proposals</button></div>
+      <p>Review the exact controller proposal before submitting a decision. Approval can execute an action in live mode. Modified proposals require fresh approval.</p>
+      <p id="response-notice" role="status" aria-live="polite"></p>
+      <div id="response-proposals"></div>
+    </section>
   </dialog>
 </body>
 </html>

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -172,6 +173,72 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_json(record, 201)
 
 
+def seed_response_queue(python, state_dir, environment):
+    secret = state_dir / "approver-secret"
+    secret.write_text("browser-operator-secret")
+    secret.chmod(0o600)
+    environment.update({
+        "DASHBOARD_RESPONSE_ENABLED": "true",
+        "BANTIS_STATE_DIR": str(state_dir),
+        "RESPONSE_APPROVER_SECRET_FILE": str(secret),
+        "RESPONSE_ENABLED_ACTIONS": "lift_promotion_hold",
+        "RESPONSE_DRY_RUN": "true",
+        "RESPONSE_AUTO_ACTION": "",
+        "RESPONSE_AUTO_REPO": "",
+        "RESPONSE_GITHUB_REPO": "",
+        "RESPONSE_GITHUB_TOKEN_PROMOTION": "",
+    })
+    now = datetime.now(UTC)
+    for action_id in ("act_browser_modify", "act_browser_approve"):
+        source = state_dir / "proposal.json"
+        source.write_text(json.dumps({
+            "action_id": action_id, "incident_id": "incident-0",
+            "type": "lift_promotion_hold", "policy_rule": "B3:operator-request",
+            "created_at": now.isoformat(), "expires_at": (now + timedelta(hours=1)).isoformat(),
+        }))
+        subprocess.run([python, str(ROOT / "response-controller/cli.py"), "propose", str(source)],
+                       env=environment, check=True, capture_output=True)
+
+
+def check_response_review(page):
+    forms = page.locator("#response-proposals form")
+    expect(forms).to_have_count(2)
+    expect(page.locator("#response-notice")).to_contain_text("Dry run")
+    viewport = page.viewport_size
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.locator("#incident-dialog").evaluate("el => el.scrollWidth <= el.clientWidth")
+    page.set_viewport_size(viewport)
+    first = forms.first
+    first.get_by_label("Reason").fill("False positive")
+    first.get_by_label("Operator approval secret").fill("wrong-secret")
+    first.get_by_role("button", name="Dismiss", exact=True).click()
+    expect(page.locator("#response-notice")).to_contain_text("Operator authentication failed")
+    expect(first.get_by_label("Operator approval secret")).to_have_value("")
+    expect(first.get_by_role("button", name="Approve", exact=True)).to_be_disabled()
+    page.locator("#response-refresh").click()
+    expect(forms.first.get_by_role("button", name="Modify", exact=True)).to_be_enabled()
+    first.get_by_label("Reason").fill("Review replacement")
+    first.get_by_label("Replacement parameters").fill("invalid JSON")
+    first.get_by_label("Operator approval secret").fill("browser-operator-secret")
+    first.get_by_role("button", name="Modify", exact=True).click()
+    expect(page.locator("#response-notice")).to_contain_text("must be a JSON object")
+    first.get_by_label("Replacement parameters").fill("{}")
+    first.get_by_role("button", name="Modify", exact=True).click()
+    expect(page.locator("#response-notice")).to_contain_text("Controller result: modified")
+    expect(forms).to_have_count(2)
+    expect(forms.last).not_to_contain_text("act_browser_modify")
+    forms.last.get_by_label("Reason").fill("False positive")
+    forms.last.get_by_label("Operator approval secret").fill("browser-operator-secret")
+    forms.last.get_by_role("button", name="Dismiss", exact=True).click()
+    expect(page.locator("#response-notice")).to_contain_text("Controller result: dismissed")
+    expect(forms).to_have_count(1)
+    forms.first.get_by_label("Operator approval secret").fill("browser-operator-secret")
+    forms.first.get_by_role("button", name="Approve", exact=True).click()
+    expect(page.locator("#response-notice")).to_contain_text("Controller result: invalidated")
+    expect(forms).to_have_count(0)
+    expect(page.locator("#response-notice")).to_contain_text("No pending controller proposals")
+
+
 def check_incidents(page, screenshots):
     page.get_by_role("link", name="Incidents", exact=True).click()
     expect(page.locator('[data-page="incidents"]')).to_have_attribute(
@@ -188,6 +255,7 @@ def check_incidents(page, screenshots):
     )
     expect(page.locator("#ask-question")).to_be_enabled()
     assert page.locator("#analysis-panel img").count() == 0
+    check_response_review(page)
     page.locator("#question").fill("Why review this evidence?")
     page.locator("#ask-question").click()
     expect(page.locator("#conversation")).to_contain_text(
@@ -487,6 +555,7 @@ def main():
     args = parser.parse_args()
     with (
         tempfile.TemporaryDirectory(prefix="bantis-audit-browser-") as audit_dir,
+        tempfile.TemporaryDirectory(prefix="bantis-response-browser-") as response_dir,
         ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as upstream,
     ):
         audit_path = Path(audit_dir) / "reviews.sqlite3"
@@ -509,6 +578,7 @@ def main():
             "COPILOT_API_URL": f"http://127.0.0.1:{upstream.server_port}",
             "COPILOT_API_TOKEN": "browser-fixture-copilot-token",
         }
+        seed_response_queue(args.python, Path(response_dir), environment)
         process = subprocess.Popen(
             [
                 args.python,
@@ -636,7 +706,7 @@ def main():
                 assert not errors, errors
                 browser.close()
                 print(
-                    "PASS: dashboard, Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    "PASS: dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()

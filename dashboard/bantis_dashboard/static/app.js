@@ -22,8 +22,13 @@ const state = { offset: 0, limit: 20, total: 0, filters: {}, socket: null, retry
   listController: null, detailController: null, lastSequence: -1, listBusy: false };
 
 const investigation = { id: null, request: 0, controller: null, canAsk: false, asking: false, lastLoaded: null };
+const reviewState = { request: 0, busy: false };
 
 function resetInvestigation() {
+  reviewState.request++; reviewState.busy = false;
+  $("response-panel").hidden = true;
+  $("response-proposals").replaceChildren(); $("response-notice").textContent = "";
+  $("response-refresh").disabled = false;
   investigation.request++; investigation.controller?.abort();
   investigation.id = null; investigation.canAsk = false; investigation.asking = false; investigation.lastLoaded = null;
   $("analysis-panel").hidden = true;
@@ -199,6 +204,7 @@ async function showIncident(id) {
     if (request !== state.detailRequest || !state.active) return;
     $("detail-title").textContent = incident.summary;
     loadAnalysis();
+    loadProposals();
     const facts = node("dl");
     for (const [label, value] of [["Incident ID", incident.incident_id], ["Severity", incident.severity],
       ["Pattern", incident.pattern], ["Created", time(incident.created_at)],
@@ -221,6 +227,86 @@ async function showIncident(id) {
     if (request === state.detailRequest && error.name !== "AbortError" && state.active) $("detail-notice").textContent = error.message;
   }
 }
+async function loadProposals(message = "") {
+  if (!investigation.id || reviewState.busy) return;
+  const id = investigation.id, request = ++reviewState.request;
+  const current = () => state.active && investigation.id === id && reviewState.request === request;
+  $("response-panel").hidden = false;
+  $("response-refresh").disabled = true;
+  $("response-proposals").replaceChildren();
+  $("response-notice").textContent = message || "Loading controller proposals…";
+  try {
+    const page = await api(`/api/incidents/${encodeURIComponent(id)}/proposals`);
+    if (!current()) return;
+    $("response-notice").textContent = `${message ? message + " " : ""}${page.dry_run ? "Dry run: approval records a plan without acting." : "LIVE mode: approval may execute the action."} ${page.items.length ? "" : "No pending controller proposals for this incident."}`;
+    for (const proposal of page.items) {
+      const form = node("form", undefined, "evidence-entry");
+      form.append(node("h3", proposal.type.replaceAll("_", " ")));
+      const facts = node("dl");
+      for (const [label, value] of [["Action ID", proposal.action_id], ["Proposal hash", proposal.proposal_hash],
+        ["Policy rule", proposal.policy_rule], ["Expires", time(proposal.expires_at)],
+        ["Required distinct reviewers", proposal.required_approvals]]) {
+        facts.append(node("dt", label), node("dd", String(value)));
+      }
+      form.append(facts, node("h4", "Current parameters"), node("pre", JSON.stringify(proposal.params, null, 2)));
+      const paramsLabel = node("label", "Replacement parameters (JSON object, used by Modify)");
+      const params = node("textarea"); params.rows = 3; params.maxLength = 8000;
+      params.value = JSON.stringify(proposal.params, null, 2); paramsLabel.append(params);
+      const reasonLabel = node("label", "Reason (required for Modify and Dismiss)");
+      const reason = node("textarea"); reason.rows = 2; reason.maxLength = 2000; reasonLabel.append(reason);
+      const secretLabel = node("label", "Operator approval secret");
+      const secret = node("input"); secret.type = "password"; secret.required = true; secret.maxLength = 512;
+      secret.autocomplete = "off"; secretLabel.append(secret);
+      form.append(paramsLabel, reasonLabel, secretLabel);
+      for (const operation of ["approve", "modify", "dismiss"]) {
+        const button = node("button", operation[0].toUpperCase() + operation.slice(1), "secondary");
+        button.type = "submit"; button.value = operation; form.append(button);
+      }
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!current() || reviewState.busy) return;
+        const operation = event.submitter?.value;
+        if (!operation) return;
+        if (operation !== "approve" && !reason.value.trim()) {
+          $("response-notice").textContent = "Enter a reason for this decision."; reason.focus(); return;
+        }
+        let replacement = {};
+        if (operation === "modify") {
+          try {
+            replacement = JSON.parse(params.value);
+            if (!replacement || Array.isArray(replacement) || typeof replacement !== "object") throw new Error();
+          } catch { $("response-notice").textContent = "Replacement parameters must be a JSON object."; params.focus(); return; }
+        }
+        const body = JSON.stringify({ operation, action_id: proposal.action_id, proposal_hash: proposal.proposal_hash,
+          secret: secret.value, reason: reason.value.trim(), params: replacement });
+        secret.value = "";
+        reviewState.busy = true; $("response-refresh").disabled = true;
+        $("response-proposals").querySelectorAll("input, textarea, button").forEach((control) => { control.disabled = true; });
+        $("response-notice").textContent = "Submitting decision to the Response Controller…";
+        try {
+          const result = await api(`/api/incidents/${encodeURIComponent(id)}/review`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body,
+          });
+          if (!current()) return;
+          reviewState.busy = false;
+          const outcome = `Controller result: ${result.status.replaceAll("_", " ")}.${result.reasons?.length ? " " + result.reasons.join("; ") : ""}${result.replacement_id ? " Replacement " + result.replacement_id + " requires fresh approval." : ""}`;
+          await loadProposals(outcome);
+        } catch (error) {
+          if (current()) $("response-notice").textContent = `${error.message} Refresh proposals and audit log before retrying; the decision may already have been recorded.`;
+        } finally {
+          if (current()) { reviewState.busy = false; $("response-refresh").disabled = false; }
+        }
+      });
+      $("response-proposals").append(form);
+    }
+  } catch (error) {
+    if (current()) $("response-notice").textContent = `${message ? message + " " : ""}${error.message}`;
+  } finally {
+    if (current()) $("response-refresh").disabled = false;
+  }
+}
+$("response-refresh").addEventListener("click", () => loadProposals());
+
 function renderAnalysis(record) {
   const content = $("analysis-content"); content.replaceChildren();
   const labels = { analyzed: "Analysis recorded", skipped: "Analysis skipped", failed: "Stored analysis failed", not_recorded: "No analysis recorded" };

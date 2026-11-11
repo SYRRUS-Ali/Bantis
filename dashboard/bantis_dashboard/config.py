@@ -33,6 +33,7 @@ class Settings:
     copilot_url: str = "http://127.0.0.1:8100"
     copilot_token: str = field(default="", repr=False)
     audit_path: Path | None = None
+    response_enabled: bool = False
 
     def __post_init__(self):
         if not 32 <= len(self.token.encode()) <= 512:
@@ -66,5 +67,6 @@ class Settings:
             else None,
             copilot_url=os.environ.get("COPILOT_API_URL", "http://127.0.0.1:8100"),
             copilot_token=os.environ.get("COPILOT_API_TOKEN", ""),
+            response_enabled=os.environ.get("DASHBOARD_RESPONSE_ENABLED", "false").lower() == "true",
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),
         )

@@ -760,3 +760,7 @@ dialog { overflow-wrap: anywhere; }
   .sidebar nav { flex-wrap: wrap; }
 }
 .audit-checkpoint { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: .72rem; }
+#response-panel { margin-top: 28px; }
+#response-proposals input { display: block; width: 100%; margin-top: 7px; }
+#response-proposals label { margin-top: 18px; }
+#response-proposals button { margin: 10px 8px 0 0; }

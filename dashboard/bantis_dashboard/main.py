@@ -30,6 +30,7 @@ from .config import Settings
 from .copilot import CopilotClient, Question
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
 from .live_feed import LiveFeed
+from .response import Decision, ResponseController
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "bantis_dashboard_session"
@@ -107,6 +108,7 @@ def create_app(
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
     audit_reader = AuditReader(settings.audit_path)
+    controller = ResponseController(settings.response_enabled)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -325,6 +327,17 @@ def create_app(
     async def ask(request: Request, incident_id: str, body: Question):
         await request.app.state.detection.incident(incident_id)
         return await request.app.state.copilot.request(incident_id, "questions", body)
+
+    @app.get("/api/incidents/{incident_id}/proposals", dependencies=[Depends(authenticated)])
+    def proposals(incident_id: str):
+        return controller.request(incident_id)
+
+    @app.post(
+        "/api/incidents/{incident_id}/review",
+        dependencies=[Depends(authenticated), Depends(same_origin)],
+    )
+    def review(incident_id: str, body: Decision):
+        return controller.request(incident_id, body)
 
     @app.websocket("/ws")
     @app.websocket("/ws/events")

@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _authenticate() -> str:
+def _authenticate(supplied: str | None = None) -> str:
     """Host identity plus a separate, operator-owned secret; never a CLI argument."""
     secret_path = os.environ.get("RESPONSE_APPROVER_SECRET_FILE")
     if not secret_path:
@@ -130,7 +130,8 @@ def _authenticate() -> str:
         expected = source.read().strip()
     if not expected:
         raise ValueError("approver secret file is empty")
-    supplied = getpass.getpass("Approver secret: ")
+    if supplied is None:
+        supplied = getpass.getpass("Approver secret: ")
     if not hmac.compare_digest(supplied.encode(), expected.encode()):
         raise ValueError("operator authentication failed")
     return pwd.getpwuid(os.getuid()).pw_name

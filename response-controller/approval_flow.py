@@ -1,4 +1,4 @@
-"""Persistent, host-local review queue. No HTTP or model-output entry point.
+"""Persistent, host-local review queue shared by CLI and dashboard review.
 
 SQLite records survive CLI invocations; a host lock serializes decisions through
 execution. The executing marker is committed *before* any external effect, so a
