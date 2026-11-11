@@ -14,7 +14,15 @@ An attacker controlling these can bypass local controls. Dedicated OS accounts,
 filesystem ownership, backups, and credential scopes must be provisioned by the
 operator. Tests do not prove those properties for a running deployment.
 
-The CLI supplies authentication and serialization. Python library methods accept
+The CLI and optional dashboard process bridge authenticate the operator using
+the host's OS identity and private secret file. Dashboard review additionally
+requires a dashboard session and rejects foreign browser origins. Every browser
+session shares the dashboard host identity, so multiple sessions cannot provide
+distinct approvals. The bridge exposes only incident-scoped pending proposals
+and Approve/Modify/Dismiss; it never accepts an actor or configuration from the
+browser. See [dashboard review tests](../dashboard/tests/test_response.py) and
+[bridge tests](../response-controller/tests/test_dashboard_review.py).
+The review flow supplies serialization. Python library methods accept
 actor and approval objects from their caller; they are not a separate remote
 authentication boundary. Guarantees about concurrent review apply to cooperating
 processes using the same journal and lock file, not independent hosts or a caller

@@ -375,8 +375,12 @@ incidents; deterministic IDs make the retry safe.
 
 ## Manual review: Approve / Modify / Dismiss
 
-Review is a **local CLI**, as specified by the design; there is no HTTP
-approval endpoint. Proposals come from trusted policy facts or deliberate
+Review uses a **local CLI** and an optional session-protected
+[dashboard review panel](../dashboard/README.md#response-review). The dashboard
+invokes the host-local JSON bridge in `dashboard_review.py`; the controller has
+no network listener. Each decision requires the same operator-owned secret and
+records the dashboard host's OS identity. Extra browser sessions do not supply
+distinct approvers. Proposals come from trusted policy facts or deliberate
 operator requests, never from AI output. The bridge supplies the promotion-hold
 policy; `propose` also accepts a proposal JSON file using the fields documented
 in the [design](../docs/response-controller-design.md#a-proposal).
