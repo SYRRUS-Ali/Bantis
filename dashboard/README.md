@@ -3,11 +3,13 @@
 A separate FastAPI service serves the initial dashboard and its local HTML,
 CSS, and JavaScript assets. The browser reads incidents through an authenticated
 backend and receives periodic status and event snapshots over WebSocket. No frontend
-build, CDN, external font, database, or model key is required.
+build, CDN, external font, or model key is required. Token-only mode needs no
+database; optional administrator setup uses a private local SQLite database.
 
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
-still requires the agreed diagrams. The wizard, emergency stop, and resume are not implemented here.
+still requires the agreed diagrams. The wizard's administrator creation step is
+implemented; service-configuration steps, emergency stop, and resume remain open.
 Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
 Optional response review connects incident proposals to the local controller's
@@ -47,7 +49,8 @@ reports the source as unavailable. No demo incidents are generated.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `DASHBOARD_TOKEN` | Required | Separate dashboard credential, 32–512 bytes; never use a controller approver secret. |
+| `DASHBOARD_TOKEN` | Required | Dashboard credential in token-only mode; setup bootstrap token in administrator mode. 32–512 bytes; never use a controller approver secret. |
+| `DASHBOARD_STATE_DIR` | Optional | Absolute path to a private, operator-owned directory. Enables first-run administrator creation and account sign-in. Without it, token-only mode remains available. |
 | `DASHBOARD_ORIGIN` | `http://127.0.0.1:8200` | Exact browser origin, without a path, query, or credentials. Used for host and browser origin checks. |
 | `DETECTION_ENGINE_URL` | `http://127.0.0.1:8000` | Server-side upstream address; never supplied by browser requests. |
 | `COPILOT_API_URL` | `http://127.0.0.1:8100` | Server-side Copilot API address. |
@@ -62,13 +65,73 @@ producers or close the controller's deployment gates. Remote deployment needs
 TLS, ingress authentication and limits, and authenticated upstream services.
 HTTPS origins cause the session cookie to use `Secure`.
 
+## Administrator setup
+
+To enable the administrator step, set a persistent state directory in the
+dashboard process before starting it:
+
+```bash
+export DASHBOARD_STATE_DIR="$HOME/.local/state/bantis-dashboard"
+```
+
+Keep `DASHBOARD_TOKEN` configured through the hidden prompt shown above. In
+administrator mode it authorizes **only initial account creation**. Open
+`http://127.0.0.1:8200/setup` or any dashboard page. Before an account exists,
+the wizard asks for the bootstrap token, an administrator username, a password,
+and password confirmation. Usernames contain 3–64 letters, digits, dots,
+underscores, or hyphens, start with a letter or digit, and are case-insensitive.
+Passwords must match, contain 15–128 characters, and must not be blank. Spaces
+and Unicode are allowed in passwords; passwords are never trimmed or truncated.
+
+Creation finishes this wizard step and opens administrator sign-in. Sign in
+with the new username and password to access the existing dashboard. This does
+not report completion of the remaining wizard steps: connections and response
+configuration still use host settings. Administrator login never supplies the
+separate controller approval secret or changes execution mode.
+
+Account state persists in `$DASHBOARD_STATE_DIR/admin.sqlite3`. A singleton
+database constraint and write transaction prevent concurrent requests, retries,
+reloads, or a second setup session from replacing the established account.
+After creation, `/setup` shows sign-in. Token login cannot open the dashboard
+at any point in administrator mode. Restarting retains the account and setup
+lock, while existing browser sessions expire on restart as before.
+
+The directory is created with mode `0700` and the database with `0600`; existing
+paths must be private and owned by the dashboard OS user. Provision a persistent
+volume when using containers and restrict backups. Passwords use a random salt
+and versioned scrypt hashing (`N=2^17`, `r=8`, `p=1`), following the
+[OWASP scrypt baseline](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
+Plaintext passwords, confirmation values, and bootstrap tokens are never stored
+in account records or returned in API responses. Creation and sign-in clear
+submitted secret fields; no credentials are written to browser storage.
+
+Setup and administrator sign-in require an exact `Origin` header. They share a
+limit of 10 authentication attempts per rolling minute across clients in the
+single worker. Password hashing is limited to one operation at a time and needs
+approximately 128 MiB of working memory; busy requests return 429. The rate
+limit is process-local and resets on restart. Keep the existing loopback/TLS and
+ingress boundaries; this is one administrator for one environment, not a user
+management or password-recovery service.
+
+Failures preserve the username and clear submitted secrets. Creation is never
+automatically retried. Use **Check setup status** after interrupted delivery: a
+completed creation switches to sign-in; an incomplete transaction can be retried.
+Missing or corrupt state during runtime returns unavailable and does not create
+a replacement database. Invalid state or permissions at startup prevent startup.
+There is no browser account-reset or password-recovery endpoint. Back up the
+private state and investigate storage failures on the host; do not delete an
+established account database to resolve an ordinary sign-in error.
+
 ## API and live updates
 
 | Route | Access | Behavior |
 |---|---|---|
-| `GET /`, `/live-feed`, `/incidents`, `/audit-log`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
+| `GET /`, `/setup`, `/live-feed`, `/incidents`, `/audit-log`, `/static/*` | Public shell | Local assets only; contains no incident records, event records, or credentials. |
 | `GET /health` | Public | Dashboard process liveness, independent of upstream availability. |
 | `POST /api/session` | Dashboard token | Creates an opaque, HttpOnly, SameSite=Strict session cookie. |
+| `GET /api/setup` | Public | Reports whether administrator mode is enabled and an account exists; returns no account details. |
+| `POST /api/setup/admin` | Bootstrap token + exact Origin | Creates the single administrator once; returns 409 after account creation. Does not issue a session. |
+| `POST /api/admin/session` | Administrator credentials + exact Origin | Creates the existing opaque session cookie in administrator mode. |
 | `GET /api/session` | Session | Checks current authentication. |
 | `DELETE /api/session` | Current cookie | Revokes the session and clears the cookie; idempotent. |
 | `GET /api/audit-log` | Session | Read-only, verified, filtered controller events with pagination. |
@@ -311,7 +374,8 @@ session; sign-out revokes its cookie, and open sockets recheck authorization on
 poll updates. The access token is not put in URLs or browser storage. Browser
 session mutations reject foreign origins; WebSocket handshakes require an exact
 origin match. HTTP clients without an Origin header can use the token login.
-This is local access control, not a multi-user identity or administrator system.
+Token mode provides shared local access. Optional administrator mode adds a
+single persistent account; neither mode is a multi-user identity system.
 
 The interface inserts incident and evidence text through `textContent`, not
 HTML. Evidence includes IDs, times, source, type, and only these details:
@@ -346,6 +410,7 @@ Python interpreter with:
 
 ```bash
 python dashboard/scripts/browser_smoke.py --python "$PWD/range/.venv/bin/python" --screenshots /tmp/bantis-dashboard-preview
+python dashboard/scripts/browser_smoke.py --python "$PWD/range/.venv/bin/python" --admin-setup
 ```
 
 The script covers sign-in failure and success, live updates, pagination,
@@ -360,6 +425,12 @@ Audit checks use a disposable journal and cover
 filters, stable pagination during appends, event details, integrity failure,
 unavailability, empty history, mobile layout, and sign-out. Screenshots contain
 synthetic test incidents, events, and audit entries.
+The `--admin-setup` variant adds mobile wizard layout, password confirmation,
+invalid bootstrap authentication, secret clearing, account creation, setup
+locking after reload, administrator sign-in, and session persistence across
+page reloads, then runs the same dashboard flows. API tests additionally cover
+process restart, concurrent creation, unavailable state, private file permissions,
+rate limiting, logout, and WebSocket revocation.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,
 and includes Detection Engine tests and real query integration in the end-to-end job. Browser
 checks are optional and are not configured as a CI job.

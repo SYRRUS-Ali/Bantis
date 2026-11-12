@@ -1,7 +1,8 @@
 # Wizard and Dashboard Design Review
 
 Review against the [design baseline](wizard-dashboard-design.md). This checklist
-is acceptance guidance for the future UI, not evidence of a running interface.
+is acceptance guidance for the full UI. The administrator step and existing
+dashboard have executable tests; the remaining wizard steps are future work.
 
 ## Reference review before design freeze
 
@@ -26,7 +27,8 @@ implementation requirements.
 | Missing provider key | Setup can finish with a clearly labeled Copilot unavailable state. |
 | Credential review | Secrets are redacted and absent from URLs, logs, and durable browser storage. |
 | Finish setup | Actions remain disabled, dry run stays enabled, and automatic response stays off. |
-| Reload or second setup session | Backend setup locking and recovery rules prevent overwriting an established administrator. These contracts must exist before this test can pass. |
+| Reload or second setup session | Transactional singleton creation prevents overwriting an established administrator. A completed creation shows sign-in; an interrupted transaction can be retried after checking setup status. |
+| Administrator authentication | Creation requires the bootstrap token and exact Origin; subsequent access requires the stored account credentials. Token login cannot bypass administrator mode. |
 
 ## Dashboard acceptance scenarios
 
@@ -58,5 +60,9 @@ all added text is English, and no draft layout is called approved. Compare the
 data-source table with the linked component guides and
 [M5 limitations](m5-closure.md#known-limitations).
 
-Runtime acceptance scenarios above remain unexecuted until an implementation
-exists. Documentation validation does not establish backend or UI readiness.
+Administrator-step coverage is in [test_admin.py](../dashboard/tests/test_admin.py)
+and the `--admin-setup` variant of the
+[browser check](../dashboard/scripts/browser_smoke.py). These verify creation,
+credential validation, persistence, concurrent submissions, setup locking,
+session behavior, rate limiting, private storage, and the browser step. They do
+not establish readiness of the remaining wizard steps or final visual approval.

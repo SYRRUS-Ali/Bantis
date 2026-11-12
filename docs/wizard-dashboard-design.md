@@ -7,7 +7,9 @@ contracts. The [dashboard foundation](../dashboard/README.md) now provides an
 initial interface, local dashboard sessions, read-only incident access, selected
 evidence, recorded Copilot analysis, follow-up questions, a read-only controller Audit log,
 periodic WebSocket status updates, and optional host-local response review.
-Wizard setup authentication remains unimplemented. All interface copy and
+The administrator creation step now supports bootstrap authentication,
+persistent account storage, and administrator sign-in. Remaining wizard steps
+are unimplemented. All interface copy and
 documentation must be in English.
 
 ## Design references and freeze criteria
@@ -33,7 +35,7 @@ affected diagram references together.
 
 - Target one operator and one environment, consistent with the
   [threat model](threat-model.md).
-- Keep setup administration separate from response authorization. A future
+- Keep setup administration separate from response authorization. The
   wizard administrator account must not implicitly grant controller approval.
 - Preserve recommend-only Copilot behavior under
   [ADR 0004](adr/0004-recommend-only-default.md). Model recommendations are
@@ -64,7 +66,7 @@ flowchart TD
 | Responsibility | Required behavior |
 |---|---|
 | Prerequisites | Explain the single-environment scope and check required services; identify failed checks individually. |
-| Administrator setup | Define a future authenticated setup boundary; do not reuse the range application account or controller approver secret. |
+| Administrator setup | Implemented when `DASHBOARD_STATE_DIR` is configured: bootstrap-authenticated creation of one persistent administrator, followed by account sign-in. Uses a separate account from the range application and a separate secret from controller approval. |
 | Service connections | Validate addresses and connectivity; distinguish reachable, unavailable, and unconfigured services. Connectivity alone does not prove authentication or deployment readiness. |
 | Copilot configuration | Allow setup without a provider key. Explain which allowlisted incident data leaves the host for the configured provider and that provider usage has a cost. |
 | Configuration review | Show connection results, Copilot availability, and response defaults without exposing credentials. Clearly identify blocking errors and optional omissions. |
@@ -73,8 +75,11 @@ flowchart TD
 Back navigation preserves non-sensitive inputs. Failed validation keeps the
 operator on the relevant step with an actionable English message. Duplicate
 submissions must not create duplicate administrator accounts or configuration
-writes. Persistence, secret storage, setup locking, session authentication, and
-recovery after interruption require backend contracts before implementation.
+writes. Administrator persistence, password hashing, transactional setup locking,
+session authentication, and recovery after interrupted creation are implemented
+in the [dashboard administrator step](../dashboard/README.md#administrator-setup).
+Configuration persistence and recovery for the remaining steps still require
+backend contracts. Creating an account does not mark the entire wizard complete.
 Credentials must not appear in review summaries, URLs, browser logs, or durable
 browser storage; configuration responses must return redacted values.
 
@@ -129,7 +134,8 @@ resume and approval invalidation remain unimplemented.
 | Correlated evidence | Detection Engine `GET /incidents/{id}/events` through the dashboard | Selected fields render as text behind a dashboard session; raw messages and tool output are omitted. |
 | Recorded initial analysis | Copilot authenticated `GET /incidents/{id}/analysis` through the dashboard session boundary | Implemented with selected fields; transient deferral and provider-outage reasons are not persisted, so absent analysis is explicitly uncertain. The SQLite file is not exposed to the browser. |
 | Follow-up conversation | Copilot `GET` and `POST /incidents/{id}/questions` | Dashboard session integration is implemented; service bearer tokens stay server-side. See [Copilot guide](../ai-copilot/README.md). |
-| Setup and administrator | No setup backend | Define first-run locking, credentials, configuration persistence, and session lifecycle. |
+| Setup administrator | Dashboard `GET /api/setup`, `POST /api/setup/admin`, and `POST /api/admin/session` | Implemented with bootstrap authorization, exact Origin checks, a private SQLite singleton, password hashing, rate limits, and the existing session lifecycle. |
+| Remaining setup steps | Host environment configuration | Service configuration, checks, configuration persistence, and wizard completion remain open. |
 | Audit history | Session-protected dashboard `GET /api/audit-log` reads a configured local controller journal in read-only mode | Implemented with full-chain local verification, selected fields, exact filters, and pagination; independent anchoring remains open. |
 | Response review | Session-protected dashboard proposals/review routes and authenticated host-local controller bridge | Implemented for Approve/Modify/Dismiss with exact hashes, operator secret, host identity, and fresh approval after modification. |
 | Response stop and rollback | Local controller CLI and journal | Browser stop, resume, and rollback remain unimplemented; preserve [controller guarantees](response-controller-security.md). |
