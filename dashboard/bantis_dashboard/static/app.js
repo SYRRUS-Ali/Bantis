@@ -1,6 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const access = { mode: "loading", setupBusy: false };
 const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
 const isLiveFeed = location.pathname === "/live-feed";
@@ -74,13 +75,17 @@ function signedOut() {
   $("incident-rows").replaceChildren(); $("detail-content").replaceChildren();
   $("incident-dialog").close();
   $("total-incidents").textContent = "—";
-  $("workspace").hidden = true; $("login-screen").hidden = false;
+  $("workspace").hidden = true;
+  $("login-screen").hidden = access.mode === "setup";
+  $("setup-screen").hidden = access.mode !== "setup";
   $("access-token").value = "";
-  $("access-token").focus();
+  $("admin-password").value = "";
+  $("setup-token").value = ""; $("setup-password").value = ""; $("setup-confirmation").value = "";
+  $(access.mode === "admin" ? "admin-username" : access.mode === "setup" ? "setup-token" : "access-token").focus();
 }
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
-  if (response.status === 401 && !(path === "/api/session" && options.method === "POST")) {
+  if (response.status === 401 && !(["/api/session", "/api/admin/session"].includes(path) && options.method === "POST")) {
     signedOut(); throw new Error("Session expired. Please sign in again.");
   }
   if (!response.ok) {
@@ -423,11 +428,74 @@ $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.target.querySelector("button"); button.disabled = true;
   const token = $("access-token").value; $("access-token").value = "";
+  const credentials = { username: $("admin-username").value, password: $("admin-password").value };
+  $("admin-password").value = "";
   try {
-    await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    await api(access.mode === "admin" ? "/api/admin/session" : "/api/session", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(access.mode === "admin" ? credentials : { token }),
+    });
     await activate();
   } catch (error) { $("login-error").textContent = error.message; }
   finally { button.disabled = false; }
+});
+
+async function loadAccess() {
+  $("access-retry").hidden = true;
+  try {
+    const status = await api("/api/setup");
+    access.mode = status.enabled ? status.admin_created ? "admin" : "setup" : "token";
+    $("setup-screen").hidden = access.mode !== "setup";
+    $("login-screen").hidden = access.mode === "setup";
+    $("login-form").hidden = access.mode === "setup";
+    $("token-fields").hidden = access.mode !== "token";
+    $("admin-fields").hidden = access.mode !== "admin";
+    $("access-token").disabled = access.mode !== "token";
+    for (const id of ["admin-username", "admin-password"]) {
+      $(id).disabled = access.mode !== "admin"; $(id).required = access.mode === "admin";
+    }
+    $("login-description").textContent = access.mode === "admin" ? "Sign in with your administrator account." : "Sign in with the dashboard access token configured on this host.";
+    return true;
+  } catch (error) {
+    $("login-screen").hidden = false; $("setup-screen").hidden = true;
+    $("login-form").hidden = true;
+    $("login-description").textContent = "Sign-in options are unavailable.";
+    $("login-error").textContent = error.message;
+    $("access-retry").hidden = false;
+    return false;
+  }
+}
+$("access-retry").addEventListener("click", loadAccess);
+$("setup-refresh").addEventListener("click", () => { if (!access.setupBusy) loadAccess(); });
+$("setup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (access.setupBusy) return;
+  const password = $("setup-password").value;
+  if (!password.trim() || password !== $("setup-confirmation").value) {
+    $("setup-notice").textContent = "Passwords must match and must not be blank."; return;
+  }
+  const body = JSON.stringify({ username: $("setup-username").value, password,
+    password_confirmation: $("setup-confirmation").value, bootstrap_token: $("setup-token").value });
+  $("setup-token").value = ""; $("setup-password").value = ""; $("setup-confirmation").value = "";
+  access.setupBusy = true;
+  $("setup-form").querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
+  $("setup-refresh").disabled = true;
+  $("setup-notice").textContent = "Creating administrator…";
+  try {
+    const result = await api("/api/setup/admin", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    $("admin-username").value = result.username;
+    $("login-error").textContent = "";
+    if (await loadAccess()) {
+      $("login-description").textContent = "Administrator created. Sign in to continue.";
+      $("admin-password").focus();
+    }
+  } catch (error) {
+    $("setup-notice").textContent = `${error.message} Check setup status before retrying; the account may already have been created.`;
+  } finally {
+    access.setupBusy = false;
+    $("setup-form").querySelectorAll("input, button").forEach((control) => { control.disabled = false; });
+    $("setup-refresh").disabled = false;
+  }
 });
 $("sign-out").addEventListener("click", async () => {
   try { await api("/api/session", { method: "DELETE" }); signedOut(); }
@@ -676,4 +744,7 @@ $("audit-refresh").addEventListener("click", () => { auditLog.boundary = null; a
 $("audit-previous").addEventListener("click", () => { auditLog.offset = Math.max(0, auditLog.offset - auditLog.limit); loadAuditLog(); });
 $("audit-next").addEventListener("click", () => { auditLog.offset += auditLog.limit; loadAuditLog(); });
 
-(async () => { try { await api("/api/session"); await activate(); } catch {} })();
+(async () => {
+  if (!await loadAccess() || access.mode === "setup") return;
+  try { await api("/api/session"); await activate(); } catch {}
+})();

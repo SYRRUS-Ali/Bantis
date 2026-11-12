@@ -34,8 +34,11 @@ class Settings:
     copilot_token: str = field(default="", repr=False)
     audit_path: Path | None = None
     response_enabled: bool = False
+    state_dir: Path | None = None
 
     def __post_init__(self):
+        if self.state_dir is not None and not self.state_dir.is_absolute():
+            raise ValueError("DASHBOARD_STATE_DIR must be an absolute path to a private directory")
         if not 32 <= len(self.token.encode()) <= 512:
             raise ValueError("DASHBOARD_TOKEN must contain 32–512 bytes")
         object.__setattr__(self, "origin", validate_url(self.origin, origin=True))
@@ -68,5 +71,7 @@ class Settings:
             copilot_url=os.environ.get("COPILOT_API_URL", "http://127.0.0.1:8100"),
             copilot_token=os.environ.get("COPILOT_API_TOKEN", ""),
             response_enabled=os.environ.get("DASHBOARD_RESPONSE_ENABLED", "false").lower() == "true",
+            state_dir=Path(os.environ["DASHBOARD_STATE_DIR"])
+            if os.environ.get("DASHBOARD_STATE_DIR") else None,
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),
         )

@@ -14,14 +14,48 @@
       <span class="brand-mark" aria-hidden="true">B</span>
       <p class="eyebrow">BANTIS / SECURITY OPERATIONS</p>
       <h1 id="login-title">Your environment.<br>Your visibility.</h1>
-      <p>Sign in with the dashboard access token configured on this host.</p>
-      <form id="login-form">
+      <p id="login-description">Checking sign-in options…</p>
+      <form id="login-form" hidden>
+        <div id="token-fields">
         <label for="access-token">Dashboard access token</label>
         <input id="access-token" type="password" required maxlength="512" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="admin-fields" hidden>
+          <label for="admin-username">Administrator username</label>
+          <input id="admin-username" type="text" minlength="3" maxlength="64" autocomplete="username" spellcheck="false" disabled>
+          <label for="admin-password">Administrator password</label>
+          <input id="admin-password" type="password" maxlength="128" autocomplete="current-password" disabled>
+        </div>
         <button type="submit" class="primary">Open dashboard <span aria-hidden="true">→</span></button>
       </form>
+      <button id="access-retry" class="secondary" type="button" hidden>Retry connection</button>
       <p id="login-error" class="error" role="alert"></p>
       <p class="fine-print">Single environment · Read-only incident access</p>
+    </div>
+  </section>
+
+  <section id="setup-screen" class="login-screen" aria-labelledby="setup-title" hidden>
+    <div class="login-card">
+      <span class="brand-mark" aria-hidden="true">B</span>
+      <p class="eyebrow">SETUP / ADMINISTRATOR</p>
+      <h1 id="setup-title">Create your administrator.</h1>
+      <p>Create the single administrator account for this environment. Enter the setup bootstrap token provided by your host operator.</p>
+      <form id="setup-form">
+        <label for="setup-token">Setup bootstrap token</label>
+        <input id="setup-token" type="password" required maxlength="512" autocomplete="off" spellcheck="false">
+        <label for="setup-username">Administrator username</label>
+        <input id="setup-username" type="text" required minlength="3" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" autocomplete="username" spellcheck="false" aria-describedby="username-help">
+        <p id="username-help" class="fine-print">3–64 letters, digits, dots, underscores, or hyphens; start with a letter or digit. Usernames are case-insensitive.</p>
+        <label for="setup-password">Administrator password</label>
+        <input id="setup-password" type="password" required minlength="15" maxlength="128" autocomplete="new-password" aria-describedby="password-help">
+        <label for="setup-confirmation">Confirm administrator password</label>
+        <input id="setup-confirmation" type="password" required minlength="15" maxlength="128" autocomplete="new-password">
+        <p id="password-help" class="fine-print">Use a unique password of 15–128 characters. Keep it separate from your bootstrap token and controller approval secret.</p>
+        <button id="create-admin" type="submit" class="primary">Create administrator</button>
+      </form>
+      <p id="setup-notice" class="error" role="alert"></p>
+      <button id="setup-refresh" class="secondary" type="button">Check setup status</button>
+      <p class="fine-print">This step creates your account. Service configuration remains managed on the host. Controller approvals require a separate operator secret.</p>
     </div>
   </section>
 

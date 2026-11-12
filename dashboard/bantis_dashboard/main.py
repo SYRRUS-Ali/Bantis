@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audit import AuditPage, AuditReader
+from .admin import AdminError, AdminStore, AuthLimiter, Credentials, NewAdmin
 from .config import Settings
 from .copilot import CopilotClient, Question
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
@@ -109,6 +110,8 @@ def create_app(
     sessions = Sessions(settings.session_seconds)
     audit_reader = AuditReader(settings.audit_path)
     controller = ResponseController(settings.response_enabled)
+    admin = AdminStore(settings.state_dir) if settings.state_dir else None
+    auth_limiter = AuthLimiter()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -183,6 +186,11 @@ def create_app(
         if not sessions.valid(request.cookies.get(COOKIE)):
             raise HTTPException(401, "Sign in to access the dashboard")
 
+    @app.exception_handler(AdminError)
+    async def admin_error(request, exc):
+        headers = {"Retry-After": "60"} if exc.status == 429 else None
+        return JSONResponse(status_code=exc.status, content={"detail": exc.message}, headers=headers)
+
     @app.exception_handler(UpstreamError)
     async def upstream_error(request, exc):
         return JSONResponse(status_code=exc.status, content={"detail": exc.message})
@@ -190,18 +198,18 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         # Validation errors must never echo the login token or arbitrary request input.
-        return JSONResponse(
-            status_code=422, content={"detail": "Invalid request parameters"}
-        )
+        message = "Invalid request parameters"
+        if request.url.path == "/api/setup/admin":
+            message = ("Use a username of 3–64 letters, digits, dots, underscores, or hyphens, "
+                       "starting with a letter or digit. Passwords must match, contain 15–128 "
+                       "characters, and must not be blank. A bootstrap token is required.")
+        return JSONResponse(status_code=422, content={"detail": message})
 
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "dashboard"}
 
-    @app.post("/api/session", dependencies=[Depends(same_origin)])
-    async def login(body: Login, request: Request, response: Response):
-        if not hmac.compare_digest(body.token.encode(), settings.token.encode()):
-            raise HTTPException(401, "Invalid dashboard access token")
+    def issue_session(request: Request, response: Response):
         existing = request.cookies.get(COOKIE)
         session_id = sessions.issue()
         sessions.entries.pop(existing, None)
@@ -214,6 +222,44 @@ def create_app(
             max_age=settings.session_seconds,
         )
         return {"authenticated": True}
+
+    def exact_origin(request: Request):
+        if request.headers.get("origin") != settings.origin:
+            raise HTTPException(403, "An exact dashboard Origin is required")
+
+    @app.get("/api/setup")
+    def setup_status():
+        return {"enabled": admin is not None, "admin_created": admin.created() if admin else False}
+
+    @app.post("/api/setup/admin", status_code=201, dependencies=[Depends(exact_origin)])
+    def create_admin(body: NewAdmin):
+        if admin is None:
+            raise AdminError(503, "Administrator setup is not configured")
+        if admin.created():
+            raise AdminError(409, "Administrator already exists. Sign in to continue")
+        auth_limiter.check()
+        if not hmac.compare_digest(body.bootstrap_token.encode(), settings.token.encode()):
+            raise AdminError(403, "Invalid setup bootstrap token")
+        admin.create(body.username, body.password)
+        # Account creation completes this step, not the remaining wizard steps.
+        return {"created": True, "username": body.username}
+
+    @app.post("/api/admin/session", dependencies=[Depends(exact_origin)])
+    def admin_login(body: Credentials, request: Request, response: Response):
+        if admin is None:
+            raise AdminError(503, "Administrator sign-in is not configured")
+        auth_limiter.check()
+        if not admin.authenticate(body.username, body.password):
+            raise AdminError(401, "Invalid administrator username or password")
+        return issue_session(request, response)
+
+    @app.post("/api/session", dependencies=[Depends(same_origin)])
+    async def login(body: Login, request: Request, response: Response):
+        if admin is not None:
+            raise HTTPException(401, "Use administrator sign-in for this dashboard")
+        if not hmac.compare_digest(body.token.encode(), settings.token.encode()):
+            raise HTTPException(401, "Invalid dashboard access token")
+        return issue_session(request, response)
 
     @app.get("/api/session", dependencies=[Depends(authenticated)])
     async def session():
@@ -395,6 +441,7 @@ def create_app(
             tasks.start_soon(run_stream, receive_disconnect)
 
     @app.get("/", include_in_schema=False)
+    @app.get("/setup", include_in_schema=False)
     @app.get("/live-feed", include_in_schema=False)
     @app.get("/incidents", include_in_schema=False)
     @app.get("/audit-log", include_in_schema=False)

@@ -764,3 +764,5 @@ dialog { overflow-wrap: anywhere; }
 #response-proposals input { display: block; width: 100%; margin-top: 7px; }
 #response-proposals label { margin-top: 18px; }
 #response-proposals button { margin: 10px 8px 0 0; }
+#setup-form label, #admin-fields label { margin-top: 18px; }
+#setup-form .fine-print { margin-top: 8px; }

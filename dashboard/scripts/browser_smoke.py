@@ -540,6 +540,50 @@ def check_audit_log(page, path, screenshots):
     assert page.evaluate("window.untrustedExecuted") is None
 
 
+def check_admin_setup(page, origin, token, screenshots):
+    password = "browser administrator passphrase"
+    expect(page.locator("#setup-screen")).to_be_visible()
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if screenshots:
+        page.screenshot(path=str(screenshots / "admin-setup-mobile.png"), full_page=True)
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.locator("#setup-username").fill("Browser.Admin")
+    page.locator("#setup-token").fill(token)
+    page.locator("#setup-password").fill(password)
+    page.locator("#setup-confirmation").fill("a different passphrase")
+    page.locator("#create-admin").click()
+    expect(page.locator("#setup-notice")).to_contain_text("Passwords must match")
+    page.locator("#setup-confirmation").fill(password)
+    page.locator("#setup-token").fill("wrong-bootstrap-token")
+    page.locator("#create-admin").click()
+    expect(page.locator("#setup-notice")).to_contain_text("Invalid setup bootstrap token")
+    expect(page.locator("#setup-username")).to_have_value("Browser.Admin")
+    for field in ("#setup-token", "#setup-password", "#setup-confirmation"):
+        expect(page.locator(field)).to_have_value("")
+    page.locator("#setup-token").fill(token)
+    page.locator("#setup-password").fill(password)
+    page.locator("#setup-confirmation").fill(password)
+    page.locator("#create-admin").click()
+    expect(page.locator("#admin-fields")).to_be_visible()
+    expect(page.locator("#login-description")).to_contain_text("Administrator created")
+    expect(page.locator("#admin-username")).to_have_value("browser.admin")
+    page.goto(origin + "/setup")
+    expect(page.locator("#setup-screen")).to_be_hidden()
+    expect(page.locator("#admin-fields")).to_be_visible()
+    page.locator("#admin-username").fill("BROWSER.ADMIN")
+    page.locator("#admin-password").fill("incorrect password")
+    page.get_by_role("button", name="Open dashboard").click()
+    expect(page.locator("#login-error")).to_contain_text("Invalid administrator username or password")
+    expect(page.locator("#admin-password")).to_have_value("")
+    page.locator("#admin-password").fill(password)
+    page.get_by_role("button", name="Open dashboard").click()
+    expect(page.locator("#workspace")).to_be_visible()
+    page.reload()
+    expect(page.locator("#workspace")).to_be_visible()
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -552,10 +596,12 @@ def main():
         type=Path,
         help="Optional directory for desktop and mobile screenshots",
     )
+    parser.add_argument("--admin-setup", action="store_true", help="Exercise first-run administrator setup and account sign-in")
     args = parser.parse_args()
     with (
         tempfile.TemporaryDirectory(prefix="bantis-audit-browser-") as audit_dir,
         tempfile.TemporaryDirectory(prefix="bantis-response-browser-") as response_dir,
+        tempfile.TemporaryDirectory(prefix="bantis-admin-browser-") as admin_dir,
         ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as upstream,
     ):
         audit_path = Path(audit_dir) / "reviews.sqlite3"
@@ -571,6 +617,7 @@ def main():
         environment = {
             **os.environ,
             "DASHBOARD_TOKEN": token,
+            "DASHBOARD_STATE_DIR": admin_dir if args.admin_setup else "",
             "DASHBOARD_ORIGIN": origin,
             "DETECTION_ENGINE_URL": f"http://127.0.0.1:{upstream.server_port}",
             "DASHBOARD_POLL_SECONDS": "1",
@@ -618,13 +665,14 @@ def main():
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.goto(origin)
-                page.get_by_label("Dashboard access token").fill("wrong")
-                page.get_by_role("button", name="Open dashboard").click()
-                expect(page.locator("#login-error")).to_contain_text(
-                    "Invalid dashboard access token"
-                )
-                page.get_by_label("Dashboard access token").fill(token)
-                page.get_by_role("button", name="Open dashboard").click()
+                if args.admin_setup:
+                    check_admin_setup(page, origin, token, args.screenshots)
+                else:
+                    page.get_by_label("Dashboard access token").fill("wrong")
+                    page.get_by_role("button", name="Open dashboard").click()
+                    expect(page.locator("#login-error")).to_contain_text("Invalid dashboard access token")
+                    page.get_by_label("Dashboard access token").fill(token)
+                    page.get_by_role("button", name="Open dashboard").click()
                 expect(page.locator("#incident-rows tr")).to_have_count(20)
                 expect(page.locator("#connection-label")).to_have_text(
                     "Live connection · periodic updates"
@@ -703,10 +751,14 @@ def main():
                 expect(page.locator("#login-screen")).to_be_visible()
                 expect(page.locator("#incident-rows tr")).to_have_count(0)
                 expect(page.locator("#live-rows tr")).to_have_count(0)
+                if args.admin_setup:
+                    expect(page.locator("#admin-fields")).to_be_visible()
+                    expect(page.locator("#admin-password")).to_have_value("")
+                    expect(page.locator("#setup-screen")).to_be_hidden()
                 assert not errors, errors
                 browser.close()
                 print(
-                    "PASS: dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    f"PASS: {'administrator wizard and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()
