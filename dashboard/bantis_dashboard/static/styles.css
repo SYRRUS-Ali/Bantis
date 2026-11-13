@@ -766,3 +766,7 @@ dialog { overflow-wrap: anywhere; }
 #response-proposals button { margin: 10px 8px 0 0; }
 #setup-form label, #admin-fields label { margin-top: 18px; }
 #setup-form .fine-print { margin-top: 8px; }
+#provider-form label { margin-top: 18px; }
+#provider-form input, #provider-form select { width: 100%; max-width: 600px; display: block; }
+#provider-form button { margin: 16px 8px 0 0; }
+#provider-view .analysis-panel { margin-bottom: 28px; }

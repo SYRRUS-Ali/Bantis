@@ -32,6 +32,7 @@ from .copilot import CopilotClient, Question
 from .detection import DetectionClient, Incident, IncidentPage, Severity, UpstreamError
 from .live_feed import LiveFeed
 from .response import Decision, ResponseController
+from .provider_setup import ProviderSave, ProviderSetup, ProviderTest
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "bantis_dashboard_session"
@@ -104,7 +105,7 @@ class StatusFeed:
 
 
 def create_app(
-    settings: Settings | None = None, *, transport=None, copilot_transport=None
+    settings: Settings | None = None, *, transport=None, copilot_transport=None, provider_transport=None
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
@@ -112,6 +113,7 @@ def create_app(
     controller = ResponseController(settings.response_enabled)
     admin = AdminStore(settings.state_dir) if settings.state_dir else None
     auth_limiter = AuthLimiter()
+    provider_setup = ProviderSetup(settings.state_dir, transport=provider_transport) if admin else None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -143,6 +145,13 @@ def create_app(
                 asyncio.create_task(feed.run())
                 for feed in (app.state.feed, app.state.live_feed)
             ]
+            if provider_setup:
+                async def expire_provider_tests():
+                    while True:
+                        await asyncio.sleep(30)
+                        provider_setup.expire()
+
+                tasks.append(asyncio.create_task(expire_provider_tests()))
             try:
                 yield
             finally:
@@ -150,6 +159,8 @@ def create_app(
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 sessions.entries.clear()
+                if provider_setup:
+                    provider_setup.clear()
 
     app = FastAPI(
         title="Bantis Dashboard",
@@ -213,6 +224,8 @@ def create_app(
         existing = request.cookies.get(COOKIE)
         session_id = sessions.issue()
         sessions.entries.pop(existing, None)
+        if provider_setup and existing:
+            provider_setup.forget(existing)
         response.set_cookie(
             COOKIE,
             session_id,
@@ -226,6 +239,27 @@ def create_app(
     def exact_origin(request: Request):
         if request.headers.get("origin") != settings.origin:
             raise HTTPException(403, "An exact dashboard Origin is required")
+
+    def provider_configured():
+        if provider_setup is None:
+            raise AdminError(503, "Enable administrator setup to configure an AI provider")
+
+    @app.get("/api/setup/provider", dependencies=[Depends(authenticated), Depends(provider_configured)])
+    def provider_status():
+        return provider_setup.status()
+
+    @app.post("/api/setup/provider/test", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(provider_configured)])
+    def test_provider(request: Request, body: ProviderTest):
+        session_id = request.cookies.get(COOKIE)
+        result = provider_setup.test(body, session_id)
+        if not sessions.valid(session_id):
+            provider_setup.forget(session_id)
+            raise HTTPException(401, "Session expired. Sign in and test the connection again")
+        return result
+
+    @app.post("/api/setup/provider", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(provider_configured)])
+    def save_provider(request: Request, body: ProviderSave):
+        return provider_setup.save(body, request.cookies.get(COOKIE))
 
     @app.get("/api/setup")
     def setup_status():
@@ -267,6 +301,8 @@ def create_app(
 
     @app.delete("/api/session", dependencies=[Depends(same_origin)])
     async def logout(request: Request, response: Response):
+        if provider_setup:
+            provider_setup.forget(request.cookies.get(COOKIE))
         sessions.entries.pop(request.cookies.get(COOKIE), None)
         response.delete_cookie(COOKIE)
         return {"authenticated": False}

@@ -582,6 +582,42 @@ def check_admin_setup(page, origin, token, screenshots):
     page.reload()
     expect(page.locator("#workspace")).to_be_visible()
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    check_provider_setup(page, origin)
+    page.goto(origin)
+
+
+def check_provider_setup(page, origin):
+    expect(page.locator("#provider-view")).to_be_visible()
+    expect(page.locator("#provider-model")).to_be_enabled()
+    expect(page.locator("#provider-save")).to_be_disabled()
+    page.locator("#provider-key").fill("browser-invalid-provider-key")
+    page.locator("#provider-test").click()
+    expect(page.locator("#provider-notice")).to_contain_text("rejected the API key")
+    expect(page.locator("#provider-key")).to_have_value("")
+    expect(page.locator("#provider-save")).to_be_disabled()
+    page.locator("#provider-key").fill("browser-fixture-provider-key")
+    page.locator("#provider-test").click()
+    expect(page.locator("#provider-notice")).to_contain_text("Connection succeeded")
+    expect(page.locator("#provider-key")).to_have_value("")
+    expect(page.locator("#provider-save")).to_be_enabled()
+    page.locator("#provider-model").fill("claude-different-model")
+    expect(page.locator("#provider-save")).to_be_disabled()
+    page.locator("#provider-key").fill("browser-fixture-provider-key")
+    page.locator("#provider-test").click()
+    expect(page.locator("#provider-notice")).to_contain_text("Connection succeeded")
+    page.locator("#provider-save").click()
+    expect(page.locator("#provider-notice")).to_contain_text("Provider saved")
+    expect(page.locator("#provider-saved")).to_contain_text("claude-different-model")
+    page.reload()
+    expect(page.locator("#provider-saved")).to_contain_text("key stored")
+    expect(page.locator("#provider-key")).to_have_value("")
+    page.locator("#ai-provider").select_option("none")
+    page.locator("#provider-save").click()
+    expect(page.locator("#provider-saved")).to_contain_text("No AI provider")
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
 
 
 def main():
@@ -602,6 +638,7 @@ def main():
         tempfile.TemporaryDirectory(prefix="bantis-audit-browser-") as audit_dir,
         tempfile.TemporaryDirectory(prefix="bantis-response-browser-") as response_dir,
         tempfile.TemporaryDirectory(prefix="bantis-admin-browser-") as admin_dir,
+        tempfile.TemporaryDirectory(prefix="bantis-provider-browser-") as provider_fixture_dir,
         ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as upstream,
     ):
         audit_path = Path(audit_dir) / "reviews.sqlite3"
@@ -626,12 +663,30 @@ def main():
             "COPILOT_API_TOKEN": "browser-fixture-copilot-token",
         }
         seed_response_queue(args.python, Path(response_dir), environment)
+        factory = "bantis_dashboard.main:create_app"
+        if args.admin_setup:
+            # Inject a provider transport only in this disposable test factory.
+            # Production still uses the fixed HTTPS Anthropic endpoint.
+            fixture = Path(provider_fixture_dir) / "provider_browser_fixture.py"
+            fixture.write_text('''import httpx
+from bantis_dashboard.main import create_app as dashboard_app
+
+def handle(request):
+    if request.headers.get("x-api-key") != "browser-fixture-provider-key":
+        return httpx.Response(401, json={"error": "private-provider-error"})
+    return httpx.Response(200, json={"type": "message", "role": "assistant", "content": [{"type": "text", "text": "OK"}]})
+
+def create_app():
+    return dashboard_app(provider_transport=httpx.MockTransport(handle))
+''')
+            environment["PYTHONPATH"] = provider_fixture_dir + os.pathsep + str(ROOT / "dashboard")
+            factory = "provider_browser_fixture:create_app"
         process = subprocess.Popen(
             [
                 args.python,
                 "-m",
                 "uvicorn",
-                "bantis_dashboard.main:create_app",
+                factory,
                 "--factory",
                 "--host",
                 "127.0.0.1",

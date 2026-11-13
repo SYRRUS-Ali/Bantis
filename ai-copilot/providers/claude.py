@@ -166,6 +166,16 @@ def from_environment() -> AIProvider:
     otherwise a stand-in that reports itself unavailable instead of
     crashing the process at startup.
     """
+    if os.environ.get("BANTIS_AI_CONFIG"):
+        from providers.configuration import load_provider_file
+
+        try:
+            saved = load_provider_file(os.environ["BANTIS_AI_CONFIG"])
+        except ValueError:
+            return UnavailableProvider("Wizard AI provider configuration is unavailable or invalid")
+        if saved["provider"] == "none":
+            return UnavailableProvider("AI was disabled in the setup wizard")
+        return ClaudeProvider(api_key=saved["api_key"], model=saved["model"])
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return UnavailableProvider("ANTHROPIC_API_KEY is not set")
     return ClaudeProvider()

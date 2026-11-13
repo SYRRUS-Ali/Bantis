@@ -68,13 +68,35 @@
         <a href="/live-feed" class="nav-item" data-page="live-feed">Live feed <span aria-hidden="true">◉</span></a>
         <a href="/incidents" class="nav-item" data-page="incidents">Incidents <span aria-hidden="true">≡</span></a>
         <a href="/audit-log" class="nav-item" data-page="audit-log">Audit log <span aria-hidden="true">↳</span></a>
+        <a href="/setup" class="nav-item" data-page="setup">Setup <span aria-hidden="true">→</span></a>
       </nav>
       <div class="sidebar-note"><span class="small-dot"></span> LOCAL OPERATIONS<p>One environment.<br>Evidence first.</p></div>
       <button id="sign-out" class="sign-out">Sign out <span aria-hidden="true">↗</span></button>
     </aside>
 
     <main id="overview">
-      <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="page-name">Overview</span></span><span class="pill neutral">READ ONLY</span></header>
+      <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="page-name">Overview</span></span><span id="workspace-mode" class="pill neutral">READ ONLY</span></header>
+      <section id="provider-view" hidden aria-labelledby="provider-title">
+        <div class="page-heading"><div><p class="eyebrow">SETUP / AI PROVIDER</p><h1 id="provider-title">Choose your AI provider.</h1><p class="subtitle">Claude is the supported provider in this version. AI is optional; detection works without it.</p></div></div>
+        <div class="analysis-panel">
+          <p id="provider-saved" role="status"></p>
+          <form id="provider-form">
+            <label for="ai-provider">AI provider</label>
+            <select id="ai-provider" disabled><option value="claude">Claude (Anthropic)</option><option value="none">No AI provider</option></select>
+            <div id="provider-credentials">
+              <label for="provider-model">Model ID</label><input id="provider-model" value="claude-sonnet-5" maxlength="128" spellcheck="false" disabled>
+              <label for="provider-key">Anthropic API key</label><input id="provider-key" type="password" maxlength="512" autocomplete="off" spellcheck="false" disabled>
+              <p class="fine-print">Test connection sends only “Reply with OK.” to Anthropic with a 16-token output limit. It may incur provider charges. Incident data is not sent. Tests are not automatically retried.</p>
+              <button id="provider-test" class="secondary" type="submit" disabled>Test connection</button>
+            </div>
+            <button id="provider-save" class="primary" type="button" disabled>Save provider</button>
+          </form>
+          <p id="provider-notice" role="status" aria-live="polite"></p>
+          <button id="provider-refresh" class="secondary" type="button">Refresh saved configuration</button>
+          <p class="fine-print">Saved keys stay in the private server configuration and are never returned here. Start or restart the Copilot worker and API with BANTIS_AI_CONFIG pointing to ai-provider.json in your dashboard state directory. Provider setup does not change response permissions or execution mode.</p>
+          <p><a href="/">Continue to dashboard →</a></p>
+        </div>
+      </section>
       <div id="overview-content">
       <section class="page-heading">
         <div><p class="eyebrow">SECURITY OPERATIONS</p><h1 id="overview-title">Environment overview<span class="title-dot">.</span></h1><p id="overview-subtitle" class="subtitle">Follow the signals. Inspect the evidence. Stay in control.</p></div>

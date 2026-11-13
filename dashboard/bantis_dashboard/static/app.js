@@ -2,22 +2,26 @@
 
 const $ = (id) => document.getElementById(id);
 const access = { mode: "loading", setupBusy: false };
+const isSetup = location.pathname === "/setup";
+const providerState = { request: 0, testId: null, busy: false, loaded: false };
 const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
 const isLiveFeed = location.pathname === "/live-feed";
 const connectionLabel = () => $(isLiveFeed ? "live-connection" : "connection-label");
 const live = { snapshot: null, displayed: [], paused: false, cleared: new Set(),
   clearedView: false, pauseTotal: null, gap: false, request: 0 };
-$("overview-content").hidden = isLiveFeed || isAuditLog;
+$("overview-content").hidden = isLiveFeed || isAuditLog || isSetup;
+$("provider-view").hidden = !isSetup;
+$("workspace-mode").textContent = isSetup ? "SETUP" : "READ ONLY";
 $("audit-log-view").hidden = !isAuditLog;
 $("live-feed-view").hidden = !isLiveFeed;
-$("page-name").textContent = isLiveFeed ? "Live feed" : isIncidents ? "Incidents" : isAuditLog ? "Audit log" : "Overview";
+$("page-name").textContent = isSetup ? "Setup" : isLiveFeed ? "Live feed" : isIncidents ? "Incidents" : isAuditLog ? "Audit log" : "Overview";
 if (isIncidents) {
   $("overview-title").textContent = "Incidents.";
   $("overview-subtitle").textContent = "Investigate correlated signals with evidence and recorded AI context.";
 }
 document.title = isLiveFeed ? "Bantis · Live feed" : isIncidents ? "Bantis · Incidents" : isAuditLog ? "Bantis · Audit log" : "Bantis · Security overview";
-document.querySelector(`[data-page="${isLiveFeed ? "live-feed" : isIncidents ? "incidents" : isAuditLog ? "audit-log" : "overview"}"]`).setAttribute("aria-current", "page");
+document.querySelector(`[data-page="${isSetup ? "setup" : isLiveFeed ? "live-feed" : isIncidents ? "incidents" : isAuditLog ? "audit-log" : "overview"}"]`).setAttribute("aria-current", "page");
 const state = { offset: 0, limit: 20, total: 0, filters: {}, socket: null, retry: null,
   delay: 1000, active: false, listRequest: 0, detailRequest: 0, lastList: null, snapshot: null,
   listController: null, detailController: null, lastSequence: -1, listBusy: false };
@@ -58,6 +62,8 @@ function stopSocket() {
   if (state.socket) { state.socket.onclose = null; state.socket.close(); state.socket = null; }
 }
 function signedOut() {
+  providerState.request++; providerState.testId = null; providerState.busy = false; providerState.loaded = false;
+  $("provider-key").value = ""; $("provider-saved").textContent = ""; $("provider-notice").textContent = "";
   state.active = false;
   resetInvestigation();
   resetAuditLog();
@@ -187,6 +193,7 @@ async function activate() {
   state.active = true; state.delay = 1000;
   $("login-screen").hidden = true; $("workspace").hidden = false;
   $("login-error").textContent = "";
+  if (isSetup) { loadProvider(); return; }
   if (isAuditLog) { loadAuditLog(); return; }
   if (isLiveFeed) { refreshLiveFeed(); connect(); return; }
   loadIncidents(); connect();
@@ -421,6 +428,84 @@ $("question-form").addEventListener("submit", async (event) => {
       $("ask-question").disabled = !investigation.canAsk; $("question").disabled = !investigation.canAsk;
     }
     if (investigation.id === id) $("ask-question").textContent = "Send question";
+  }
+});
+
+function providerControls() {
+  const disabled = providerState.busy || !providerState.loaded;
+  const claude = $("ai-provider").value === "claude";
+  $("ai-provider").disabled = disabled;
+  $("provider-credentials").hidden = !claude;
+  $("provider-model").disabled = disabled || !claude;
+  $("provider-key").disabled = disabled || !claude;
+  $("provider-test").disabled = disabled || !claude;
+  $("provider-save").disabled = disabled || (claude && !providerState.testId);
+  $("provider-refresh").disabled = providerState.busy;
+}
+async function loadProvider() {
+  if (providerState.busy) return;
+  const request = ++providerState.request;
+  providerState.testId = null; providerState.loaded = false; providerState.busy = true;
+  $("provider-key").value = ""; providerControls();
+  $("provider-notice").textContent = "Loading provider configuration…";
+  try {
+    const saved = await api("/api/setup/provider");
+    if (!state.active || request !== providerState.request) return;
+    $("provider-saved").textContent = saved.configured ? `Saved provider: ${saved.provider === "none" ? "No AI provider" : "Claude · " + saved.model + " · key stored"}.` : "No provider selection has been saved.";
+    $("ai-provider").value = saved.configured ? saved.provider : "claude";
+    if (saved.model) $("provider-model").value = saved.model;
+    providerState.loaded = true;
+    $("provider-notice").textContent = "Test your key and model before saving Claude, or select No AI provider.";
+  } catch (error) {
+    if (state.active && request === providerState.request) $("provider-notice").textContent = error.message;
+  } finally {
+    if (request === providerState.request) { providerState.busy = false; providerControls(); }
+  }
+}
+for (const id of ["ai-provider", "provider-model", "provider-key"]) {
+  $(id).addEventListener("input", () => {
+    providerState.testId = null;
+    if (id === "ai-provider") $("provider-key").value = "";
+    providerControls();
+  });
+}
+$("provider-refresh").addEventListener("click", loadProvider);
+$("provider-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (providerState.busy || !providerState.loaded || $("ai-provider").value !== "claude") return;
+  const key = $("provider-key").value, model = $("provider-model").value;
+  if (!key || !model) { $("provider-notice").textContent = "Enter a model ID and API key."; return; }
+  const request = ++providerState.request;
+  providerState.testId = null; providerState.busy = true;
+  $("provider-key").value = ""; providerControls();
+  $("provider-notice").textContent = "Testing the connection with Anthropic…";
+  try {
+    const result = await api("/api/setup/provider/test", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "claude", model, api_key: key }) });
+    if (!state.active || request !== providerState.request) return;
+    providerState.testId = result.test_id;
+    $("provider-notice").textContent = "Connection succeeded. Save this tested configuration within five minutes.";
+  } catch (error) {
+    if (state.active && request === providerState.request) $("provider-notice").textContent = `${error.message} Configuration was not saved.`;
+  } finally {
+    if (request === providerState.request) { providerState.busy = false; providerControls(); }
+  }
+});
+$("provider-save").addEventListener("click", async () => {
+  if (providerState.busy || !providerState.loaded) return;
+  const request = ++providerState.request;
+  providerState.busy = true; providerControls();
+  try {
+    await api("/api/setup/provider", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: $("ai-provider").value, test_id: providerState.testId || "" }) });
+    if (!state.active || request !== providerState.request) return;
+    providerState.busy = false;
+    await loadProvider();
+    if (state.active) $("provider-notice").textContent = "Provider saved. Start or restart Copilot with the saved configuration to apply it.";
+  } catch (error) {
+    if (state.active && request === providerState.request) $("provider-notice").textContent = `${error.message} Refresh the saved configuration before retrying.`;
+  } finally {
+    if (request === providerState.request) { providerState.busy = false; providerControls(); }
   }
 });
 
