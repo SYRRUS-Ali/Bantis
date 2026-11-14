@@ -8,8 +8,9 @@ initial interface, local dashboard sessions, read-only incident access, selected
 evidence, recorded Copilot analysis, follow-up questions, a read-only controller Audit log,
 periodic WebSocket status updates, and optional host-local response review.
 The administrator creation step now supports bootstrap authentication,
-persistent account storage, and administrator sign-in. Remaining wizard steps
-are unimplemented. All interface copy and
+persistent account storage, and administrator sign-in. The AI provider step
+supports Claude or no AI, a real connection test, and private configuration
+persistence consumed by Copilot on startup. Other wizard steps remain open. All interface copy and
 documentation must be in English.
 
 ## Design references and freeze criteria
@@ -68,7 +69,7 @@ flowchart TD
 | Prerequisites | Explain the single-environment scope and check required services; identify failed checks individually. |
 | Administrator setup | Implemented when `DASHBOARD_STATE_DIR` is configured: bootstrap-authenticated creation of one persistent administrator, followed by account sign-in. Uses a separate account from the range application and a separate secret from controller approval. |
 | Service connections | Validate addresses and connectivity; distinguish reachable, unavailable, and unconfigured services. Connectivity alone does not prove authentication or deployment readiness. |
-| Copilot configuration | Allow setup without a provider key. Explain which allowlisted incident data leaves the host for the configured provider and that provider usage has a cost. |
+| Copilot configuration | Implemented for Claude or no AI: administrator-authorized connection test, session-bound test receipt, private save, and redacted retrieval. Tests send only a fixed minimal prompt and may incur charges. Copilot loads saved settings on startup; operational service connectivity remains separate. |
 | Configuration review | Show connection results, Copilot availability, and response defaults without exposing credentials. Clearly identify blocking errors and optional omissions. |
 | Completion | Open the dashboard only after required setup checks succeed; show an explicit unavailable state for optional services. |
 
@@ -78,7 +79,8 @@ submissions must not create duplicate administrator accounts or configuration
 writes. Administrator persistence, password hashing, transactional setup locking,
 session authentication, and recovery after interrupted creation are implemented
 in the [dashboard administrator step](../dashboard/README.md#administrator-setup).
-Configuration persistence and recovery for the remaining steps still require
+AI provider persistence and test-before-save are implemented separately in the
+[provider step](../dashboard/README.md#ai-provider-setup). Configuration persistence and recovery for the remaining steps still require
 backend contracts. Creating an account does not mark the entire wizard complete.
 Credentials must not appear in review summaries, URLs, browser logs, or durable
 browser storage; configuration responses must return redacted values.
@@ -135,6 +137,7 @@ resume and approval invalidation remain unimplemented.
 | Recorded initial analysis | Copilot authenticated `GET /incidents/{id}/analysis` through the dashboard session boundary | Implemented with selected fields; transient deferral and provider-outage reasons are not persisted, so absent analysis is explicitly uncertain. The SQLite file is not exposed to the browser. |
 | Follow-up conversation | Copilot `GET` and `POST /incidents/{id}/questions` | Dashboard session integration is implemented; service bearer tokens stay server-side. See [Copilot guide](../ai-copilot/README.md). |
 | Setup administrator | Dashboard `GET /api/setup`, `POST /api/setup/admin`, and `POST /api/admin/session` | Implemented with bootstrap authorization, exact Origin checks, a private SQLite singleton, password hashing, rate limits, and the existing session lifecycle. |
+| AI provider selection | Dashboard `GET`/`POST /api/setup/provider` and `POST /api/setup/provider/test`; Copilot `BANTIS_AI_CONFIG` | Implemented for Claude or no AI, real server-side testing, receipts bound to tested credentials and session, private atomic persistence, and startup consumption by worker and API. |
 | Remaining setup steps | Host environment configuration | Service configuration, checks, configuration persistence, and wizard completion remain open. |
 | Audit history | Session-protected dashboard `GET /api/audit-log` reads a configured local controller journal in read-only mode | Implemented with full-chain local verification, selected fields, exact filters, and pagination; independent anchoring remains open. |
 | Response review | Session-protected dashboard proposals/review routes and authenticated host-local controller bridge | Implemented for Approve/Modify/Dismiss with exact hashes, operator secret, host identity, and fresh approval after modification. |

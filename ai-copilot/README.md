@@ -62,6 +62,23 @@ ai-copilot/
 
 ## Status
 
+The dashboard [AI provider wizard](../dashboard/README.md#ai-provider-setup)
+can test and save a Claude key and model, or explicitly select no AI provider.
+Set `BANTIS_AI_CONFIG` to the absolute path of the dashboard's private
+`ai-provider.json` file in both worker and API processes, then start or restart
+them. Both load the saved selection at startup. The file overrides
+`ANTHROPIC_API_KEY`; an explicit opt-out or invalid configuration never falls
+back to the environment key. The file must be owned by the Copilot OS user and
+have no group or other permissions. Run both services under the same trusted
+OS account, with access to the private directory. The key is operational
+plaintext in this file; keep it and backups private.
+
+Without `BANTIS_AI_CONFIG`, the existing environment-based setup remains
+unchanged. Wizard connection tests send a fixed minimal prompt, incur provider
+usage, and do not use or populate incident records, decision logs, or the
+worker's token budget. They do not prove that a subsequent incident analysis
+will pass its own validation or budget checks.
+
 A basic, working connection to the Claude API exists behind an
 abstraction (`AIProvider`), per [ADR 0003](../docs/adr/0003-single-ai-provider-first.md)
 — adding a second provider later means writing a new class that

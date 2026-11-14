@@ -1,7 +1,7 @@
 # Wizard and Dashboard Design Review
 
 Review against the [design baseline](wizard-dashboard-design.md). This checklist
-is acceptance guidance for the full UI. The administrator step and existing
+is acceptance guidance for the full UI. The administrator and AI provider steps and existing
 dashboard have executable tests; the remaining wizard steps are future work.
 
 ## Reference review before design freeze
@@ -29,6 +29,9 @@ implementation requirements.
 | Finish setup | Actions remain disabled, dry run stays enabled, and automatic response stays off. |
 | Reload or second setup session | Transactional singleton creation prevents overwriting an established administrator. A completed creation shows sign-in; an interrupted transaction can be retried after checking setup status. |
 | Administrator authentication | Creation requires the bootstrap token and exact Origin; subsequent access requires the stored account credentials. Token login cannot bypass administrator mode. |
+| Provider connection | Claude testing sends a real bounded provider request; invalid keys, inaccessible models, timeouts, malformed responses, and rate limits cannot report success. Tests are not retried automatically. |
+| Provider save | Saving Claude requires an unexpired test receipt from the same session. Changed settings require a new test. No AI can be saved without credentials or a network request. |
+| Provider secrets and restart | Keys are absent from retrieval, errors, and browser storage. Private saved settings survive restart and are loaded by Copilot at startup; invalid files cannot silently fall back to an environment key. |
 
 ## Dashboard acceptance scenarios
 
@@ -66,3 +69,10 @@ and the `--admin-setup` variant of the
 credential validation, persistence, concurrent submissions, setup locking,
 session behavior, rate limiting, private storage, and the browser step. They do
 not establish readiness of the remaining wizard steps or final visual approval.
+
+Provider coverage is in
+[test_provider_setup.py](../dashboard/tests/test_provider_setup.py),
+[test_provider_configuration.py](../ai-copilot/tests/test_provider_configuration.py),
+and the same browser variant. Automated checks use fixture provider responses
+and incur no external charges. A live account check uses the implemented
+**Test connection** control with an operator-supplied API key.

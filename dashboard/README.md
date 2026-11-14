@@ -8,8 +8,9 @@ database; optional administrator setup uses a private local SQLite database.
 
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
-still requires the agreed diagrams. The wizard's administrator creation step is
-implemented; service-configuration steps, emergency stop, and resume remain open.
+still requires the agreed diagrams. The wizard supports administrator creation
+and optional AI provider selection with a real connection test. Other service
+configuration steps, emergency stop, and resume remain open.
 Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
 Optional response review connects incident proposals to the local controller's
@@ -86,7 +87,8 @@ and Unicode are allowed in passwords; passwords are never trimmed or truncated.
 Creation finishes this wizard step and opens administrator sign-in. Sign in
 with the new username and password to access the existing dashboard. This does
 not report completion of the remaining wizard steps: connections and response
-configuration still use host settings. Administrator login never supplies the
+configuration still use host settings. Open **Setup** after signing in to select
+an AI provider. Administrator login never supplies the
 separate controller approval secret or changes execution mode.
 
 Account state persists in `$DASHBOARD_STATE_DIR/admin.sqlite3`. A singleton
@@ -122,6 +124,54 @@ There is no browser account-reset or password-recovery endpoint. Back up the
 private state and investigate storage failures on the host; do not delete an
 established account database to resolve an ordinary sign-in error.
 
+## AI provider setup
+
+With administrator mode enabled, sign in and open **Setup** (`/setup`). Select
+**Claude (Anthropic)**, enter a model ID available to your account and an API key,
+then choose **Test connection**. Claude is the implemented v1 provider; OpenAI
+and local providers are not advertised as available.
+
+The backend makes one real HTTPS request to Anthropic's
+[Messages API](https://platform.claude.com/docs/en/api/messages/create), using
+the entered key and model, the fixed text `Reply with OK.`, and a 16-token output
+limit. No incident data, questions, or controller state are sent. A successful
+test requires a valid assistant message with nonempty text. Invalid credentials,
+model access problems, rate limits, outages, malformed responses, and timeouts
+have distinct sanitized errors. A timeout may already have incurred usage;
+tests are never retried automatically. Tests have their own process-local limit
+of 10 per rolling minute and are outside the Copilot's incident token budget.
+
+Only a successful test enables **Save provider**. The server binds the tested
+key and model to this session through a receipt valid for five minutes. Editing
+the selection or model requires a new test; the save API cannot substitute
+different credentials. Secret fields clear on submission. Pending keys are
+discarded after save, logout, session rotation, restart, or expiry cleanup
+(every 30 seconds). Expired or foreign-session receipts cannot be saved.
+
+Saving atomically writes `$DASHBOARD_STATE_DIR/ai-provider.json` with mode `0600`
+in the existing private directory. The file contains the API key in plaintext
+for the Copilot to use; protect it and its backups as credentials. Retrieval
+returns only provider, model, and whether a key is stored. No key is returned to
+the browser or written to browser storage. Select **No AI provider** and save
+to remove the stored key and continue without AI; no connection request occurs.
+
+In both Copilot worker and API processes, configure the same absolute file path
+before starting or restarting them:
+
+```bash
+export BANTIS_AI_CONFIG="$DASHBOARD_STATE_DIR/ai-provider.json"
+```
+
+Set `DASHBOARD_STATE_DIR` to the same absolute location in that shell, or specify
+the complete file path directly. The Copilot loads this file at startup; saving
+does not reconfigure an already running process. The file takes precedence over
+`ANTHROPIC_API_KEY`. Explicit **No AI provider**, missing files, and invalid or
+publicly readable files make AI unavailable without falling back to another key.
+When `BANTIS_AI_CONFIG` is unset, existing environment-based configuration still
+works. Copilot API connectivity and its separate `COPILOT_API_TOKEN` must still
+be configured as described below. This step does not start services or mark the
+entire wizard complete.
+
 ## API and live updates
 
 | Route | Access | Behavior |
@@ -132,6 +182,9 @@ established account database to resolve an ordinary sign-in error.
 | `GET /api/setup` | Public | Reports whether administrator mode is enabled and an account exists; returns no account details. |
 | `POST /api/setup/admin` | Bootstrap token + exact Origin | Creates the single administrator once; returns 409 after account creation. Does not issue a session. |
 | `POST /api/admin/session` | Administrator credentials + exact Origin | Creates the existing opaque session cookie in administrator mode. |
+| `GET /api/setup/provider` | Administrator session | Redacted saved provider selection. Requires administrator mode. |
+| `POST /api/setup/provider/test` | Administrator session + exact Origin | One real connection test; returns a session-bound receipt on success. |
+| `POST /api/setup/provider` | Administrator session + exact Origin | Saves a tested selection, or disables AI without a provider request. |
 | `GET /api/session` | Session | Checks current authentication. |
 | `DELETE /api/session` | Current cookie | Revokes the session and clears the cookie; idempotent. |
 | `GET /api/audit-log` | Session | Read-only, verified, filtered controller events with pagination. |
@@ -428,7 +481,10 @@ synthetic test incidents, events, and audit entries.
 The `--admin-setup` variant adds mobile wizard layout, password confirmation,
 invalid bootstrap authentication, secret clearing, account creation, setup
 locking after reload, administrator sign-in, and session persistence across
-page reloads, then runs the same dashboard flows. API tests additionally cover
+page reloads, then runs the same dashboard flows. It also checks provider errors,
+successful testing, save invalidation after edits, persistence, secret clearing,
+and opting out of AI. A test-only injected provider transport avoids external
+charges; production uses the fixed Anthropic HTTPS endpoint. API tests additionally cover
 process restart, concurrent creation, unavailable state, private file permissions,
 rate limiting, logout, and WebSocket revocation.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,
