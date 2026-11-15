@@ -94,7 +94,30 @@
           <p id="provider-notice" role="status" aria-live="polite"></p>
           <button id="provider-refresh" class="secondary" type="button">Refresh saved configuration</button>
           <p class="fine-print">Saved keys stay in the private server configuration and are never returned here. Start or restart the Copilot worker and API with BANTIS_AI_CONFIG pointing to ai-provider.json in your dashboard state directory. Provider setup does not change response permissions or execution mode.</p>
-          <p><a href="/">Continue to dashboard →</a></p>
+          <p><button id="setup-next" class="secondary" type="button">Next: optional Telegram →</button></p>
+        </div>
+      </section>
+      <section id="telegram-view" hidden aria-labelledby="telegram-title">
+        <div class="page-heading"><div><p class="eyebrow">SETUP / OPTIONAL TELEGRAM</p><h1 id="telegram-title">Connect Telegram.</h1><p class="subtitle">Telegram is optional. You can skip this step and use the dashboard without it.</p></div></div>
+        <div class="analysis-panel">
+          <p id="telegram-saved" role="status"></p>
+          <form id="telegram-form">
+            <label for="telegram-enabled">Telegram</label>
+            <select id="telegram-enabled" disabled><option value="false">Skip Telegram</option><option value="true">Configure Telegram</option></select>
+            <div id="telegram-credentials" hidden>
+              <label for="telegram-token">Bot token</label><input id="telegram-token" type="password" maxlength="256" autocomplete="off" spellcheck="false" disabled>
+              <label for="telegram-chat">Chat ID</label><input id="telegram-chat" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="telegram-help" disabled>
+              <p id="telegram-help" class="fine-print">Create a bot with Telegram's BotFather. Start a private chat with your bot, or add it to your group or channel with permission to send messages. Enter the numeric chat ID (including its minus sign for groups), or a public channel username such as @my_channel.</p>
+              <p class="fine-print">Send test message sends one fixed setup message to this chat. No incident data is sent. Tests are never retried automatically; check your chat before retrying after a timeout.</p>
+              <button id="telegram-test" class="secondary" type="submit" disabled>Send test message</button>
+            </div>
+            <button id="telegram-save" class="primary" type="button" disabled>Save and continue</button>
+          </form>
+          <p id="telegram-notice" role="status" aria-live="polite"></p>
+          <button id="telegram-refresh" class="secondary" type="button">Refresh Telegram configuration</button>
+          <p class="fine-print">The bot token stays in private server storage and is never returned here. This step saves and tests the connection; automatic incident notifications are not available yet.</p>
+          <p><button id="setup-back" class="secondary" type="button">← Back to AI provider</button></p>
+          <p id="telegram-continue" hidden><a href="/">Continue to dashboard →</a></p>
         </div>
       </section>
       <div id="overview-content">

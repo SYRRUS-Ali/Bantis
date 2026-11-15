@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const access = { mode: "loading", setupBusy: false };
 const isSetup = location.pathname === "/setup";
 const providerState = { request: 0, testId: null, busy: false, loaded: false };
+const telegramState = { request: 0, testId: null, busy: false, loaded: false };
 const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
 const isLiveFeed = location.pathname === "/live-feed";
@@ -62,6 +63,11 @@ function stopSocket() {
   if (state.socket) { state.socket.onclose = null; state.socket.close(); state.socket = null; }
 }
 function signedOut() {
+  telegramState.request++; telegramState.testId = null; telegramState.busy = false; telegramState.loaded = false;
+  $("telegram-token").value = ""; $("telegram-chat").value = "";
+  $("telegram-saved").textContent = ""; $("telegram-notice").textContent = "";
+  $("telegram-continue").hidden = true; $("telegram-view").hidden = true;
+  $("provider-view").hidden = !isSetup;
   providerState.request++; providerState.testId = null; providerState.busy = false; providerState.loaded = false;
   $("provider-key").value = ""; $("provider-saved").textContent = ""; $("provider-notice").textContent = "";
   state.active = false;
@@ -506,6 +512,95 @@ $("provider-save").addEventListener("click", async () => {
     if (state.active && request === providerState.request) $("provider-notice").textContent = `${error.message} Refresh the saved configuration before retrying.`;
   } finally {
     if (request === providerState.request) { providerState.busy = false; providerControls(); }
+  }
+});
+
+function telegramControls() {
+  const disabled = telegramState.busy || !telegramState.loaded;
+  const enabled = $("telegram-enabled").value === "true";
+  $("telegram-enabled").disabled = disabled;
+  $("telegram-credentials").hidden = !enabled;
+  $("telegram-token").disabled = disabled || !enabled;
+  $("telegram-chat").disabled = disabled || !enabled;
+  $("telegram-test").disabled = disabled || !enabled;
+  $("telegram-save").disabled = disabled || (enabled && !telegramState.testId);
+  $("telegram-save").textContent = enabled ? "Save Telegram" : "Skip Telegram and continue";
+  $("telegram-refresh").disabled = telegramState.busy;
+}
+async function loadTelegram() {
+  if (telegramState.busy) return;
+  const request = ++telegramState.request;
+  telegramState.testId = null; telegramState.loaded = false; telegramState.busy = true;
+  $("telegram-token").value = ""; $("telegram-continue").hidden = true; telegramControls();
+  $("telegram-notice").textContent = "Loading Telegram configuration…";
+  try {
+    const saved = await api("/api/setup/telegram");
+    if (!state.active || request !== telegramState.request) return;
+    $("telegram-saved").textContent = saved.configured ? (saved.enabled ? `Telegram saved for ${saved.chat_id} · token stored.` : "Telegram skipped. No bot token is stored.") : "No Telegram selection has been saved.";
+    $("telegram-enabled").value = String(saved.enabled);
+    if (saved.chat_id) $("telegram-chat").value = saved.chat_id;
+    telegramState.loaded = true;
+    $("telegram-continue").hidden = !saved.configured;
+    $("telegram-notice").textContent = "Send a test message before saving Telegram, or skip this optional step.";
+  } catch (error) {
+    if (state.active && request === telegramState.request) $("telegram-notice").textContent = error.message;
+  } finally {
+    if (request === telegramState.request) { telegramState.busy = false; telegramControls(); }
+  }
+}
+$("setup-next").addEventListener("click", () => {
+  $("provider-view").hidden = true; $("telegram-view").hidden = false;
+  if (!telegramState.loaded) loadTelegram();
+  $("telegram-title").setAttribute("tabindex", "-1"); $("telegram-title").focus();
+});
+$("setup-back").addEventListener("click", () => {
+  $("telegram-view").hidden = true; $("provider-view").hidden = false;
+  $("provider-title").setAttribute("tabindex", "-1"); $("provider-title").focus();
+});
+for (const id of ["telegram-enabled", "telegram-token", "telegram-chat"]) {
+  $(id).addEventListener("input", () => {
+    telegramState.testId = null; $("telegram-continue").hidden = true;
+    if (id === "telegram-enabled") $("telegram-token").value = "";
+    telegramControls();
+  });
+}
+$("telegram-refresh").addEventListener("click", loadTelegram);
+$("telegram-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (telegramState.busy || !telegramState.loaded || $("telegram-enabled").value !== "true") return;
+  const botToken = $("telegram-token").value, chatId = $("telegram-chat").value;
+  if (!botToken || !chatId) { $("telegram-notice").textContent = "Enter a bot token and chat ID."; return; }
+  const request = ++telegramState.request;
+  telegramState.testId = null; telegramState.busy = true;
+  $("telegram-token").value = ""; telegramControls();
+  $("telegram-notice").textContent = "Sending one test message to Telegram…";
+  try {
+    const result = await api("/api/setup/telegram/test", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bot_token: botToken, chat_id: chatId }) });
+    if (!state.active || request !== telegramState.request) return;
+    telegramState.testId = result.test_id;
+    $("telegram-notice").textContent = "Test message sent. Save this tested configuration within five minutes.";
+  } catch (error) {
+    if (state.active && request === telegramState.request) $("telegram-notice").textContent = `${error.message} Configuration was not saved.`;
+  } finally {
+    if (request === telegramState.request) { telegramState.busy = false; telegramControls(); }
+  }
+});
+$("telegram-save").addEventListener("click", async () => {
+  if (telegramState.busy || !telegramState.loaded) return;
+  const request = ++telegramState.request;
+  telegramState.busy = true; telegramControls();
+  try {
+    await api("/api/setup/telegram", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: $("telegram-enabled").value === "true", test_id: telegramState.testId || "" }) });
+    if (!state.active || request !== telegramState.request) return;
+    telegramState.busy = false;
+    await loadTelegram();
+    if (state.active) $("telegram-notice").textContent = "Telegram selection saved. Continue to the dashboard when ready.";
+  } catch (error) {
+    if (state.active && request === telegramState.request) $("telegram-notice").textContent = `${error.message} Refresh the saved configuration before retrying.`;
+  } finally {
+    if (request === telegramState.request) { telegramState.busy = false; telegramControls(); }
   }
 });
 

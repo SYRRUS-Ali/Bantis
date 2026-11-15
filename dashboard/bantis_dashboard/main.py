@@ -33,6 +33,7 @@ from .detection import DetectionClient, Incident, IncidentPage, Severity, Upstre
 from .live_feed import LiveFeed
 from .response import Decision, ResponseController
 from .provider_setup import ProviderSave, ProviderSetup, ProviderTest
+from .telegram_setup import TelegramSave, TelegramSetup, TelegramTest
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "bantis_dashboard_session"
@@ -105,7 +106,8 @@ class StatusFeed:
 
 
 def create_app(
-    settings: Settings | None = None, *, transport=None, copilot_transport=None, provider_transport=None
+    settings: Settings | None = None, *, transport=None, copilot_transport=None,
+    provider_transport=None, telegram_transport=None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
@@ -114,6 +116,9 @@ def create_app(
     admin = AdminStore(settings.state_dir) if settings.state_dir else None
     auth_limiter = AuthLimiter()
     provider_setup = ProviderSetup(settings.state_dir, transport=provider_transport) if admin else None
+
+    telegram_setup = TelegramSetup(settings.state_dir, transport=telegram_transport) if admin else None
+    setup_services = [service for service in (provider_setup, telegram_setup) if service]
 
     @asynccontextmanager
     async def lifespan(app):
@@ -145,13 +150,14 @@ def create_app(
                 asyncio.create_task(feed.run())
                 for feed in (app.state.feed, app.state.live_feed)
             ]
-            if provider_setup:
-                async def expire_provider_tests():
+            if setup_services:
+                async def expire_setup_tests():
                     while True:
                         await asyncio.sleep(30)
-                        provider_setup.expire()
+                        for service in setup_services:
+                            service.expire()
 
-                tasks.append(asyncio.create_task(expire_provider_tests()))
+                tasks.append(asyncio.create_task(expire_setup_tests()))
             try:
                 yield
             finally:
@@ -159,8 +165,8 @@ def create_app(
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 sessions.entries.clear()
-                if provider_setup:
-                    provider_setup.clear()
+                for service in setup_services:
+                    service.clear()
 
     app = FastAPI(
         title="Bantis Dashboard",
@@ -214,6 +220,10 @@ def create_app(
             message = ("Use a username of 3–64 letters, digits, dots, underscores, or hyphens, "
                        "starting with a letter or digit. Passwords must match, contain 15–128 "
                        "characters, and must not be blank. A bootstrap token is required.")
+        elif request.url.path == "/api/setup/telegram/test":
+            message = ("Enter a bot token containing a numeric bot ID, a colon, and its secret, "
+                       "plus a nonzero numeric chat ID (including its minus sign for groups) "
+                       "or a public channel username such as @my_channel.")
         return JSONResponse(status_code=422, content={"detail": message})
 
     @app.get("/health")
@@ -224,8 +234,9 @@ def create_app(
         existing = request.cookies.get(COOKIE)
         session_id = sessions.issue()
         sessions.entries.pop(existing, None)
-        if provider_setup and existing:
-            provider_setup.forget(existing)
+        if existing:
+            for service in setup_services:
+                service.forget(existing)
         response.set_cookie(
             COOKIE,
             session_id,
@@ -260,6 +271,27 @@ def create_app(
     @app.post("/api/setup/provider", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(provider_configured)])
     def save_provider(request: Request, body: ProviderSave):
         return provider_setup.save(body, request.cookies.get(COOKIE))
+
+    def telegram_configured():
+        if telegram_setup is None:
+            raise AdminError(503, "Enable administrator setup to configure Telegram")
+
+    @app.get("/api/setup/telegram", dependencies=[Depends(authenticated), Depends(telegram_configured)])
+    def telegram_status():
+        return telegram_setup.status()
+
+    @app.post("/api/setup/telegram/test", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(telegram_configured)])
+    def test_telegram(request: Request, body: TelegramTest):
+        session_id = request.cookies.get(COOKIE)
+        result = telegram_setup.test(body, session_id)
+        if not sessions.valid(session_id):
+            telegram_setup.forget(session_id)
+            raise HTTPException(401, "Session expired. Sign in and test Telegram again")
+        return result
+
+    @app.post("/api/setup/telegram", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(telegram_configured)])
+    def save_telegram(request: Request, body: TelegramSave):
+        return telegram_setup.save(body, request.cookies.get(COOKIE))
 
     @app.get("/api/setup")
     def setup_status():
@@ -301,8 +333,8 @@ def create_app(
 
     @app.delete("/api/session", dependencies=[Depends(same_origin)])
     async def logout(request: Request, response: Response):
-        if provider_setup:
-            provider_setup.forget(request.cookies.get(COOKIE))
+        for service in setup_services:
+            service.forget(request.cookies.get(COOKIE))
         sessions.entries.pop(request.cookies.get(COOKIE), None)
         response.delete_cookie(COOKIE)
         return {"authenticated": False}

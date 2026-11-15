@@ -583,6 +583,7 @@ def check_admin_setup(page, origin, token, screenshots):
     expect(page.locator("#workspace")).to_be_visible()
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
     check_provider_setup(page, origin)
+    check_telegram_setup(page)
     page.goto(origin)
 
 
@@ -618,6 +619,61 @@ def check_provider_setup(page, origin):
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.set_viewport_size({"width": 1440, "height": 1100})
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+def check_telegram_setup(page):
+    page.locator("#setup-next").click()
+    expect(page.locator("#telegram-view")).to_be_visible()
+    expect(page.locator("#telegram-enabled")).to_be_enabled()
+    expect(page.locator("#telegram-saved")).to_contain_text("No Telegram selection")
+    page.locator("#telegram-enabled").select_option("true")
+    expect(page.locator("#telegram-save")).to_be_disabled()
+    page.locator("#telegram-chat").fill("-100123456789")
+    page.locator("#telegram-token").fill("123456789:browser-invalid-telegram-token")
+    page.locator("#telegram-test").click()
+    expect(page.locator("#telegram-notice")).to_contain_text("rejected the bot token")
+    expect(page.locator("#telegram-token")).to_have_value("")
+    expect(page.locator("#telegram-save")).to_be_disabled()
+    page.locator("#telegram-token").fill("123456789:browser-fixture-telegram-token")
+    page.locator("#telegram-test").click()
+    expect(page.locator("#telegram-notice")).to_contain_text("Test message sent")
+    expect(page.locator("#telegram-token")).to_have_value("")
+    expect(page.locator("#telegram-save")).to_be_enabled()
+    page.locator("#telegram-chat").fill("-100987654321")
+    expect(page.locator("#telegram-save")).to_be_disabled()
+    page.locator("#setup-back").click()
+    expect(page.locator("#provider-view")).to_be_visible()
+    page.locator("#setup-next").click()
+    expect(page.locator("#telegram-chat")).to_have_value("-100987654321")
+    page.locator("#telegram-token").fill("123456789:browser-fixture-telegram-token")
+    page.locator("#telegram-test").click()
+    expect(page.locator("#telegram-notice")).to_contain_text("Test message sent")
+    page.locator("#telegram-save").click()
+    expect(page.locator("#telegram-saved")).to_contain_text("-100987654321")
+    expect(page.locator("#telegram-continue")).to_be_visible()
+    page.reload()
+    page.locator("#setup-next").click()
+    expect(page.locator("#telegram-saved")).to_contain_text("token stored")
+    expect(page.locator("#telegram-token")).to_have_value("")
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.locator("#telegram-enabled").select_option("false")
+    expect(page.locator("#telegram-credentials")).to_be_hidden()
+    page.locator("#telegram-save").click()
+    expect(page.locator("#telegram-saved")).to_contain_text("Telegram skipped")
+    expect(page.locator("#telegram-continue")).to_be_visible()
+    page.reload()
+    page.locator("#setup-next").click()
+    expect(page.locator("#telegram-saved")).to_contain_text("Telegram skipped")
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    page.locator("#sign-out").click()
+    expect(page.locator("#telegram-view")).to_be_hidden()
+    expect(page.locator("#telegram-token")).to_have_value("")
+    page.locator("#admin-username").fill("browser.admin")
+    page.locator("#admin-password").fill("browser administrator passphrase")
+    page.get_by_role("button", name="Open dashboard").click()
+    expect(page.locator("#workspace")).to_be_visible()
+    page.set_viewport_size({"width": 1440, "height": 1100})
 
 
 def main():
@@ -665,19 +721,27 @@ def main():
         seed_response_queue(args.python, Path(response_dir), environment)
         factory = "bantis_dashboard.main:create_app"
         if args.admin_setup:
-            # Inject a provider transport only in this disposable test factory.
-            # Production still uses the fixed HTTPS Anthropic endpoint.
+            # Inject fixture transports only in this disposable test factory.
+            # Production uses the fixed HTTPS Anthropic and Telegram endpoints.
             fixture = Path(provider_fixture_dir) / "provider_browser_fixture.py"
-            fixture.write_text('''import httpx
+            fixture.write_text('''import json
+import httpx
 from bantis_dashboard.main import create_app as dashboard_app
+from bantis_dashboard.telegram_setup import TEST_MESSAGE
 
 def handle(request):
     if request.headers.get("x-api-key") != "browser-fixture-provider-key":
         return httpx.Response(401, json={"error": "private-provider-error"})
     return httpx.Response(200, json={"type": "message", "role": "assistant", "content": [{"type": "text", "text": "OK"}]})
 
+def telegram(request):
+    if "browser-fixture-telegram-token" not in request.url.path:
+        return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "private-telegram-error"})
+    chat_id = int(json.loads(request.content)["chat_id"])
+    return httpx.Response(200, json={"ok": True, "result": {"message_id": 1, "chat": {"id": chat_id}, "text": TEST_MESSAGE}})
+
 def create_app():
-    return dashboard_app(provider_transport=httpx.MockTransport(handle))
+    return dashboard_app(provider_transport=httpx.MockTransport(handle), telegram_transport=httpx.MockTransport(telegram))
 ''')
             environment["PYTHONPATH"] = provider_fixture_dir + os.pathsep + str(ROOT / "dashboard")
             factory = "provider_browser_fixture:create_app"
@@ -813,7 +877,7 @@ def create_app():
                 assert not errors, errors
                 browser.close()
                 print(
-                    f"PASS: {'administrator wizard and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    f"PASS: {'administrator wizard, AI provider, optional Telegram, and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()
