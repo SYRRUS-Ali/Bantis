@@ -9,7 +9,7 @@ database; optional administrator setup uses a private local SQLite database.
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
 still requires the agreed diagrams. The wizard supports administrator creation
-and optional AI provider selection with a real connection test. Other service
+and optional AI provider and Telegram steps with real connection tests. Other service
 configuration steps, emergency stop, and resume remain open.
 Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
@@ -88,7 +88,7 @@ Creation finishes this wizard step and opens administrator sign-in. Sign in
 with the new username and password to access the existing dashboard. This does
 not report completion of the remaining wizard steps: connections and response
 configuration still use host settings. Open **Setup** after signing in to select
-an AI provider. Administrator login never supplies the
+an AI provider and configure or skip Telegram. Administrator login never supplies the
 separate controller approval secret or changes execution mode.
 
 Account state persists in `$DASHBOARD_STATE_DIR/admin.sqlite3`. A singleton
@@ -172,6 +172,49 @@ works. Copilot API connectivity and its separate `COPILOT_API_TOKEN` must still
 be configured as described below. This step does not start services or mark the
 entire wizard complete.
 
+## Optional Telegram setup
+
+In administrator mode, open **Setup**, then **Next: optional Telegram** after
+the AI provider step. Choose **Skip Telegram** and **Skip Telegram and continue**
+to save an explicit disabled selection without a token or network request. This
+also removes any previously stored bot token. Detection and the dashboard work
+without Telegram. **Back to AI provider** preserves the chat ID during navigation.
+
+To configure Telegram, create a bot using Telegram's BotFather. Start a private
+chat with it, or add it to the target group or channel and allow it to send
+messages. Enter its bot token and a numeric chat ID (preserve the minus sign for
+groups), or a public channel username such as `@my_channel`. Choose **Send test
+message**. The server sends one fixed English setup message using Telegram's
+[sendMessage API](https://core.telegram.org/bots/api#sendmessage). No incident,
+account, or controller data is sent. Success requires a valid sent-message
+response, including the expected numeric chat ID when one was entered.
+
+A successful test enables **Save Telegram** for five minutes using a receipt
+bound to the tested token, chat, and administrator session. Editing the inputs
+requires a new test. Tests have a separate limit of 10 per rolling minute and
+are never automatically retried. A timeout can occur after delivery; check the
+chat before manually retrying. Invalid tokens, inaccessible chats, rate limits,
+malformed replies, and outages show sanitized English errors and cannot save an
+enabled configuration. Failed saves preserve the previous file; refresh saved
+configuration after interrupted delivery before retrying.
+
+Saving atomically writes `$DASHBOARD_STATE_DIR/telegram.json` with mode `0600`
+inside the existing private directory. Enabled settings contain `version: 1`,
+`enabled: true`, `bot_token`, and `chat_id`. A skipped selection contains only
+`version: 1` and `enabled: false`. The token is plaintext for future server-side
+use; protect this file and its backups. Retrieval returns only configured and
+enabled flags, the chat ID, and whether a token exists. The token field clears
+on test submission and logout, and credentials never enter browser storage.
+HTTPX request logs redact the token required in Telegram's upstream API path.
+Receipts clear on save, logout, session rotation, restart, and expiry cleanup.
+Saved selections survive restart; unreadable, malformed, or public files report
+unavailable rather than silently disabling Telegram.
+
+After saving either selection, choose **Continue to dashboard**. This implements
+connection setup and its test message only; automatic incident notification
+delivery remains future work. Saving does not mark the entire wizard complete,
+change controller permissions, or enable response actions.
+
 ## API and live updates
 
 | Route | Access | Behavior |
@@ -185,6 +228,9 @@ entire wizard complete.
 | `GET /api/setup/provider` | Administrator session | Redacted saved provider selection. Requires administrator mode. |
 | `POST /api/setup/provider/test` | Administrator session + exact Origin | One real connection test; returns a session-bound receipt on success. |
 | `POST /api/setup/provider` | Administrator session + exact Origin | Saves a tested selection, or disables AI without a provider request. |
+| `GET /api/setup/telegram` | Administrator session | Redacted saved Telegram selection; requires administrator mode. |
+| `POST /api/setup/telegram/test` | Administrator session + exact Origin | Sends one fixed test message and returns a session-bound receipt. |
+| `POST /api/setup/telegram` | Administrator session + exact Origin | Saves tested credentials, or skips Telegram and removes the stored token without a network request. |
 | `GET /api/session` | Session | Checks current authentication. |
 | `DELETE /api/session` | Current cookie | Revokes the session and clears the cookie; idempotent. |
 | `GET /api/audit-log` | Session | Read-only, verified, filtered controller events with pagination. |
@@ -478,13 +524,15 @@ Audit checks use a disposable journal and cover
 filters, stable pagination during appends, event details, integrity failure,
 unavailability, empty history, mobile layout, and sign-out. Screenshots contain
 synthetic test incidents, events, and audit entries.
-The `--admin-setup` variant adds mobile wizard layout, password confirmation,
-invalid bootstrap authentication, secret clearing, account creation, setup
+The `--admin-setup` variant also checks Telegram testing, changed-chat invalidation,
+private save, reload, back navigation, skipping, mobile layout, and logout using
+fixture responses. No real Telegram messages are sent. It also covers password
+confirmation, invalid bootstrap authentication, secret clearing, account creation, setup
 locking after reload, administrator sign-in, and session persistence across
 page reloads, then runs the same dashboard flows. It also checks provider errors,
 successful testing, save invalidation after edits, persistence, secret clearing,
-and opting out of AI. A test-only injected provider transport avoids external
-charges; production uses the fixed Anthropic HTTPS endpoint. API tests additionally cover
+and opting out of AI. Test-only injected transports avoid external requests;
+production uses the fixed Anthropic and Telegram HTTPS endpoints. API tests additionally cover
 process restart, concurrent creation, unavailable state, private file permissions,
 rate limiting, logout, and WebSocket revocation.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,

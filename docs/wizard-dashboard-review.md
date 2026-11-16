@@ -1,7 +1,7 @@
 # Wizard and Dashboard Design Review
 
 Review against the [design baseline](wizard-dashboard-design.md). This checklist
-is acceptance guidance for the full UI. The administrator and AI provider steps and existing
+is acceptance guidance for the full UI. The administrator, AI provider, and optional Telegram steps and existing
 dashboard have executable tests; the remaining wizard steps are future work.
 
 ## Reference review before design freeze
@@ -32,6 +32,13 @@ implementation requirements.
 | Provider connection | Claude testing sends a real bounded provider request; invalid keys, inaccessible models, timeouts, malformed responses, and rate limits cannot report success. Tests are not retried automatically. |
 | Provider save | Saving Claude requires an unexpired test receipt from the same session. Changed settings require a new test. No AI can be saved without credentials or a network request. |
 | Provider secrets and restart | Keys are absent from retrieval, errors, and browser storage. Private saved settings survive restart and are loaded by Copilot at startup; invalid files cannot silently fall back to an environment key. |
+
+Telegram acceptance also requires: skipping without credentials or a network
+request; one fixed test message before enabled save; actionable sanitized errors;
+invalidating receipts after edits, expiry, logout, or session rotation; preserving
+the chat ID on Back; redacting tokens in retrieval and HTTPX logs; private atomic
+storage; and persistence of both enabled and skipped selections after restart.
+Automatic incident notification delivery is outside this step.
 
 ## Dashboard acceptance scenarios
 
@@ -76,3 +83,10 @@ Provider coverage is in
 and the same browser variant. Automated checks use fixture provider responses
 and incur no external charges. A live account check uses the implemented
 **Test connection** control with an operator-supplied API key.
+
+Telegram API coverage is in
+[test_telegram_setup.py](../dashboard/tests/test_telegram_setup.py), with browser
+coverage in the `--admin-setup` variant. Automated tests use Telegram fixture
+responses and send no real messages. To check actual delivery, use **Send test
+message** with your own bot and chat, confirm the fixed message arrived, then
+save or skip the optional integration.
