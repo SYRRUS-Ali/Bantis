@@ -33,6 +33,8 @@ from .detection import DetectionClient, Incident, IncidentPage, Severity, Upstre
 from .live_feed import LiveFeed
 from .response import Decision, ResponseController
 from .provider_setup import ProviderSave, ProviderSetup, ProviderTest
+from .permissions_setup import PermissionsSave, PermissionsSetup
+from .secret_store import SecretStore
 from .telegram_setup import TelegramSave, TelegramSetup, TelegramTest
 
 STATIC = Path(__file__).parent / "static"
@@ -115,10 +117,14 @@ def create_app(
     controller = ResponseController(settings.response_enabled)
     admin = AdminStore(settings.state_dir) if settings.state_dir else None
     auth_limiter = AuthLimiter()
-    provider_setup = ProviderSetup(settings.state_dir, transport=provider_transport) if admin else None
-
-    telegram_setup = TelegramSetup(settings.state_dir, transport=telegram_transport) if admin else None
+    secret_store = SecretStore(settings.state_dir, settings.secrets_key_file) if admin else None
+    permissions = PermissionsSetup(secret_store, response_enabled=settings.response_enabled) if admin else None
+    provider_setup = ProviderSetup(settings.state_dir, transport=provider_transport, store=secret_store) if admin else None
+    telegram_setup = TelegramSetup(settings.state_dir, transport=telegram_transport, store=secret_store) if admin else None
     setup_services = [service for service in (provider_setup, telegram_setup) if service]
+
+    for service in setup_services:
+        service.migrate()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -251,6 +257,27 @@ def create_app(
         if request.headers.get("origin") != settings.origin:
             raise HTTPException(403, "An exact dashboard Origin is required")
 
+    def require_capability(capability):
+        if permissions:
+            permissions.require(capability)
+
+    def permissions_configured():
+        if permissions is None:
+            raise AdminError(503, "Enable administrator setup to configure permissions and encrypted storage")
+
+    @app.get("/api/setup/permissions", dependencies=[Depends(authenticated), Depends(permissions_configured)])
+    def permissions_status():
+        return permissions.status()
+
+    @app.post("/api/setup/permissions", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(permissions_configured)])
+    def save_permissions(body: PermissionsSave):
+        # Keep revocation and receipt consumption ordered within this process.
+        with permissions.lock:
+            result = permissions.save(body)
+            for service in setup_services:
+                service.clear()
+            return result
+
     def provider_configured():
         if provider_setup is None:
             raise AdminError(503, "Enable administrator setup to configure an AI provider")
@@ -261,8 +288,15 @@ def create_app(
 
     @app.post("/api/setup/provider/test", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(provider_configured)])
     def test_provider(request: Request, body: ProviderTest):
+        with permissions.lock:
+            require_capability("ai_requests")
+            generation = permissions.generation
         session_id = request.cookies.get(COOKIE)
         result = provider_setup.test(body, session_id)
+        with permissions.lock:
+            if generation != permissions.generation:
+                provider_setup.forget(session_id)
+                raise HTTPException(409, "Permissions changed during testing. Test the connection again")
         if not sessions.valid(session_id):
             provider_setup.forget(session_id)
             raise HTTPException(401, "Session expired. Sign in and test the connection again")
@@ -270,7 +304,10 @@ def create_app(
 
     @app.post("/api/setup/provider", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(provider_configured)])
     def save_provider(request: Request, body: ProviderSave):
-        return provider_setup.save(body, request.cookies.get(COOKIE))
+        with permissions.lock:
+            if body.provider != "none":
+                require_capability("ai_requests")
+            return provider_setup.save(body, request.cookies.get(COOKIE))
 
     def telegram_configured():
         if telegram_setup is None:
@@ -282,8 +319,15 @@ def create_app(
 
     @app.post("/api/setup/telegram/test", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(telegram_configured)])
     def test_telegram(request: Request, body: TelegramTest):
+        with permissions.lock:
+            require_capability("telegram_messages")
+            generation = permissions.generation
         session_id = request.cookies.get(COOKIE)
         result = telegram_setup.test(body, session_id)
+        with permissions.lock:
+            if generation != permissions.generation:
+                telegram_setup.forget(session_id)
+                raise HTTPException(409, "Permissions changed during testing. Send a new test message")
         if not sessions.valid(session_id):
             telegram_setup.forget(session_id)
             raise HTTPException(401, "Session expired. Sign in and test Telegram again")
@@ -291,7 +335,10 @@ def create_app(
 
     @app.post("/api/setup/telegram", dependencies=[Depends(authenticated), Depends(exact_origin), Depends(telegram_configured)])
     def save_telegram(request: Request, body: TelegramSave):
-        return telegram_setup.save(body, request.cookies.get(COOKIE))
+        with permissions.lock:
+            if body.enabled:
+                require_capability("telegram_messages")
+            return telegram_setup.save(body, request.cookies.get(COOKIE))
 
     @app.get("/api/setup")
     def setup_status():
@@ -439,6 +486,7 @@ def create_app(
         dependencies=[Depends(authenticated), Depends(same_origin)],
     )
     async def ask(request: Request, incident_id: str, body: Question):
+        require_capability("ai_requests")
         await request.app.state.detection.incident(incident_id)
         return await request.app.state.copilot.request(incident_id, "questions", body)
 
@@ -451,6 +499,7 @@ def create_app(
         dependencies=[Depends(authenticated), Depends(same_origin)],
     )
     def review(incident_id: str, body: Decision):
+        require_capability("response_decisions")
         return controller.request(incident_id, body)
 
     @app.websocket("/ws")

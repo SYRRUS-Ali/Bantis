@@ -1,10 +1,7 @@
 """Authenticated provider setup with a real, bounded provider request."""
 
 import json
-import os
 import secrets
-import stat
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -14,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .admin import AdminError, AuthLimiter
+from .secret_store import SecretStore
 
 ENDPOINT = "https://api.anthropic.com/v1/messages"
 
@@ -39,21 +37,34 @@ class ProviderSave(BaseModel):
 
 
 class ProviderSetup:
-    def __init__(self, directory: Path, *, transport=None):
+    def __init__(self, directory: Path, *, transport=None, store=None):
         self.path = directory / "ai-provider.json"
+        self.store = store or SecretStore(directory)
         self.transport = transport
         self.limiter = AuthLimiter()
         self.lock = threading.Lock()
         self.pending = {}
 
+    def migrate(self):
+        try:
+            data, legacy = self.store.read("ai-provider", allow_legacy=True)
+        except FileNotFoundError:
+            return
+        if legacy:
+            self._status(data)
+            self._write(data)
+
     def status(self):
         try:
-            with self.path.open("rb") as source:
-                info = os.fstat(source.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                        or info.st_mode & 0o077 or info.st_size > 4096):
-                    raise ValueError("Invalid provider file")
-                data = json.loads(source.read(4097))
+            data, _ = self.store.read("ai-provider")
+            return self._status(data)
+        except FileNotFoundError:
+            return {"configured": False, "provider": "none", "model": None, "has_key": False}
+        except (OSError, ValueError, ValidationError) as exc:
+            raise AdminError(503, "Saved AI provider configuration is unavailable") from exc
+
+    def _status(self, data):
+        try:
             if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
                 raise ValueError("Invalid provider version")
             if data.get("provider") == "none" and set(data) == {"version", "provider"}:
@@ -63,10 +74,8 @@ class ProviderSetup:
             fields = {key: value for key, value in data.items() if key != "version"}
             parsed = ProviderTest.model_validate(fields)
             return {"configured": True, "provider": "claude", "model": parsed.model, "has_key": True}
-        except FileNotFoundError:
-            return {"configured": False, "provider": "none", "model": None, "has_key": False}
-        except (OSError, ValueError, ValidationError) as exc:
-            raise AdminError(503, "Saved AI provider configuration is unavailable") from exc
+        except (OSError, ValueError, ValidationError):
+            raise AdminError(503, "Saved AI provider configuration is unavailable") from None
 
     def _prune(self):
         now = time.monotonic()
@@ -151,25 +160,4 @@ class ProviderSetup:
         return self.status()
 
     def _write(self, data):
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, delete=False) as target:
-                temporary = target.name
-                os.fchmod(target.fileno(), 0o600)
-                json.dump(data, target)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as exc:
-            raise AdminError(503, "AI provider configuration could not be saved") from exc
-        finally:
-            if temporary and os.path.exists(temporary):
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
+        self.store.write("ai-provider", data)

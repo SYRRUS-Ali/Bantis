@@ -2,11 +2,8 @@
 
 import json
 import logging
-import os
 import re
 import secrets
-import stat
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -15,6 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .admin import AdminError, AuthLimiter
+from .secret_store import SecretStore
 
 
 class _RedactBotToken(logging.Filter):
@@ -44,21 +42,34 @@ class TelegramSave(BaseModel):
 
 
 class TelegramSetup:
-    def __init__(self, directory: Path, *, transport=None):
+    def __init__(self, directory: Path, *, transport=None, store=None):
         self.path = directory / "telegram.json"
+        self.store = store or SecretStore(directory)
         self.transport = transport
         self.limiter = AuthLimiter()
         self.lock = threading.Lock()
         self.pending = {}
 
+    def migrate(self):
+        try:
+            data, legacy = self.store.read("telegram", allow_legacy=True)
+        except FileNotFoundError:
+            return
+        if legacy:
+            self._status(data)
+            self._write(data)
+
     def status(self):
         try:
-            with self.path.open("rb") as source:
-                info = os.fstat(source.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                        or info.st_mode & 0o077 or info.st_size > 4096):
-                    raise ValueError("Invalid Telegram file")
-                data = json.loads(source.read(4097))
+            data, _ = self.store.read("telegram")
+            return self._status(data)
+        except FileNotFoundError:
+            return {"configured": False, "enabled": False, "chat_id": None, "has_token": False}
+        except (OSError, ValueError) as exc:
+            raise AdminError(503, "Saved Telegram configuration is unavailable") from exc
+
+    def _status(self, data):
+        try:
             if (not isinstance(data, dict) or type(data.get("version")) is not int
                     or data["version"] != 1 or type(data.get("enabled")) is not bool):
                 raise ValueError("Invalid Telegram configuration")
@@ -70,10 +81,8 @@ class TelegramSetup:
             if set(data) != {"version", "enabled"}:
                 raise ValueError("Invalid disabled configuration")
             return {"configured": True, "enabled": False, "chat_id": None, "has_token": False}
-        except FileNotFoundError:
-            return {"configured": False, "enabled": False, "chat_id": None, "has_token": False}
-        except (OSError, ValueError) as exc:
-            raise AdminError(503, "Saved Telegram configuration is unavailable") from exc
+        except (OSError, ValueError):
+            raise AdminError(503, "Saved Telegram configuration is unavailable") from None
 
     def _prune(self):
         now = time.monotonic()
@@ -163,25 +172,4 @@ class TelegramSetup:
         return self.status()
 
     def _write(self, data):
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, delete=False) as target:
-                temporary = target.name
-                os.fchmod(target.fileno(), 0o600)
-                json.dump(data, target)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as exc:
-            raise AdminError(503, "Telegram configuration could not be saved") from exc
-        finally:
-            if temporary and os.path.exists(temporary):
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
+        self.store.write("telegram", data)

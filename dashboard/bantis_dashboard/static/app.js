@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const access = { mode: "loading", setupBusy: false };
 const isSetup = location.pathname === "/setup";
 const providerState = { request: 0, testId: null, busy: false, loaded: false };
+const permissionsState = { request: 0, busy: false, loaded: false, saved: false, responseAvailable: false };
 const telegramState = { request: 0, testId: null, busy: false, loaded: false };
 const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
@@ -12,7 +13,8 @@ const connectionLabel = () => $(isLiveFeed ? "live-connection" : "connection-lab
 const live = { snapshot: null, displayed: [], paused: false, cleared: new Set(),
   clearedView: false, pauseTotal: null, gap: false, request: 0 };
 $("overview-content").hidden = isLiveFeed || isAuditLog || isSetup;
-$("provider-view").hidden = !isSetup;
+$("provider-view").hidden = true;
+$("permissions-view").hidden = !isSetup;
 $("workspace-mode").textContent = isSetup ? "SETUP" : "READ ONLY";
 $("audit-log-view").hidden = !isAuditLog;
 $("live-feed-view").hidden = !isLiveFeed;
@@ -63,11 +65,15 @@ function stopSocket() {
   if (state.socket) { state.socket.onclose = null; state.socket.close(); state.socket = null; }
 }
 function signedOut() {
+  permissionsState.request++; permissionsState.busy = false; permissionsState.loaded = false; permissionsState.saved = false;
+  $("permissions-notice").textContent = ""; $("permissions-storage").textContent = ""; $("permissions-saved").textContent = "";
+  for (const id of ["permission-ai", "permission-telegram", "permission-response"]) $(id).checked = false;
+  $("permissions-view").hidden = !isSetup;
   telegramState.request++; telegramState.testId = null; telegramState.busy = false; telegramState.loaded = false;
   $("telegram-token").value = ""; $("telegram-chat").value = "";
   $("telegram-saved").textContent = ""; $("telegram-notice").textContent = "";
   $("telegram-continue").hidden = true; $("telegram-view").hidden = true;
-  $("provider-view").hidden = !isSetup;
+  $("provider-view").hidden = true;
   providerState.request++; providerState.testId = null; providerState.busy = false; providerState.loaded = false;
   $("provider-key").value = ""; $("provider-saved").textContent = ""; $("provider-notice").textContent = "";
   state.active = false;
@@ -199,7 +205,7 @@ async function activate() {
   state.active = true; state.delay = 1000;
   $("login-screen").hidden = true; $("workspace").hidden = false;
   $("login-error").textContent = "";
-  if (isSetup) { loadProvider(); return; }
+  if (isSetup) { loadPermissions(); return; }
   if (isAuditLog) { loadAuditLog(); return; }
   if (isLiveFeed) { refreshLiveFeed(); connect(); return; }
   loadIncidents(); connect();
@@ -435,6 +441,84 @@ $("question-form").addEventListener("submit", async (event) => {
     }
     if (investigation.id === id) $("ask-question").textContent = "Send question";
   }
+});
+
+function permissionsControls() {
+  const disabled = permissionsState.busy || !permissionsState.loaded;
+  $("permission-ai").disabled = disabled;
+  $("permission-telegram").disabled = disabled;
+  $("permission-response").disabled = disabled || !permissionsState.responseAvailable;
+  $("permissions-save").disabled = disabled;
+  $("permissions-refresh").disabled = permissionsState.busy;
+  $("permissions-next").disabled = disabled || !permissionsState.saved;
+}
+function renderPermissions(saved) {
+  $("permission-ai").checked = saved.ai_requests;
+  $("permission-telegram").checked = saved.telegram_messages;
+  $("permission-response").checked = saved.response_decisions && saved.response_review_available;
+  permissionsState.responseAvailable = saved.response_review_available;
+  permissionsState.saved = saved.configured;
+  $("permissions-saved").textContent = saved.configured ? "Dashboard permissions are saved." : "No permissions saved. Optional capabilities are disabled by default.";
+  $("permissions-storage").textContent = "Encrypted local storage: ready · Fernet authenticated encryption · private key and file permissions verified.";
+  $("permissions-response-help").textContent = saved.response_review_available ? "The controller's operator secret and policy checks are still required. This permission does not enable live or automatic execution." : "Manual response review is unavailable until the host operator enables it. Live and automatic execution remain controlled by the controller.";
+}
+async function loadPermissions() {
+  if (permissionsState.busy) return;
+  const request = ++permissionsState.request;
+  permissionsState.busy = true; permissionsState.loaded = false; permissionsControls();
+  $("permissions-notice").textContent = "Checking permissions and encrypted storage…";
+  try {
+    const saved = await api("/api/setup/permissions");
+    if (!state.active || request !== permissionsState.request) return;
+    renderPermissions(saved); permissionsState.loaded = true;
+    $("permissions-notice").textContent = "Save your choices before continuing. Leaving all permissions off keeps dashboard access read-only.";
+  } catch (error) {
+    if (state.active && request === permissionsState.request) {
+      $("permissions-storage").textContent = "Encrypted storage status unavailable.";
+      $("permissions-notice").textContent = error.message;
+    }
+  } finally {
+    if (request === permissionsState.request) { permissionsState.busy = false; permissionsControls(); }
+  }
+}
+for (const id of ["permission-ai", "permission-telegram", "permission-response"]) {
+  $(id).addEventListener("change", () => { permissionsState.saved = false; permissionsControls(); });
+}
+$("permissions-refresh").addEventListener("click", loadPermissions);
+$("permissions-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (permissionsState.busy || !permissionsState.loaded) return;
+  const request = ++permissionsState.request;
+  const body = JSON.stringify({ ai_requests: $("permission-ai").checked,
+    telegram_messages: $("permission-telegram").checked, response_decisions: $("permission-response").checked });
+  permissionsState.busy = true; permissionsControls();
+  $("permissions-notice").textContent = "Saving permissions…";
+  try {
+    const saved = await api("/api/setup/permissions", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    if (!state.active || request !== permissionsState.request) return;
+    renderPermissions(saved);
+    providerState.testId = null; telegramState.testId = null;
+    $("provider-key").value = ""; $("telegram-token").value = "";
+    providerControls(); telegramControls();
+    $("permissions-notice").textContent = "Permissions saved. Previous connection tests were cleared; test again before saving credentials.";
+  } catch (error) {
+    if (state.active && request === permissionsState.request) {
+      permissionsState.saved = false;
+      $("permissions-storage").textContent = "Storage status requires a refresh.";
+      $("permissions-notice").textContent = `${error.message} Refresh permissions before retrying.`;
+    }
+  } finally {
+    if (request === permissionsState.request) { permissionsState.busy = false; permissionsControls(); }
+  }
+});
+$("permissions-next").addEventListener("click", () => {
+  $("permissions-view").hidden = true; $("provider-view").hidden = false;
+  if (!providerState.loaded) loadProvider();
+  $("provider-title").setAttribute("tabindex", "-1"); $("provider-title").focus();
+});
+$("provider-back").addEventListener("click", () => {
+  $("provider-view").hidden = true; $("permissions-view").hidden = false;
+  $("permissions-title").setAttribute("tabindex", "-1"); $("permissions-title").focus();
 });
 
 function providerControls() {

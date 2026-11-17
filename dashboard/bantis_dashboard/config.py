@@ -35,10 +35,13 @@ class Settings:
     audit_path: Path | None = None
     response_enabled: bool = False
     state_dir: Path | None = None
+    secrets_key_file: Path | None = None
 
     def __post_init__(self):
         if self.state_dir is not None and not self.state_dir.is_absolute():
             raise ValueError("DASHBOARD_STATE_DIR must be an absolute path to a private directory")
+        if self.secrets_key_file is not None and not self.secrets_key_file.is_absolute():
+            raise ValueError("BANTIS_SECRETS_KEY_FILE must be an absolute path")
         if not 32 <= len(self.token.encode()) <= 512:
             raise ValueError("DASHBOARD_TOKEN must contain 32–512 bytes")
         object.__setattr__(self, "origin", validate_url(self.origin, origin=True))
@@ -73,5 +76,7 @@ class Settings:
             response_enabled=os.environ.get("DASHBOARD_RESPONSE_ENABLED", "false").lower() == "true",
             state_dir=Path(os.environ["DASHBOARD_STATE_DIR"])
             if os.environ.get("DASHBOARD_STATE_DIR") else None,
+            secrets_key_file=Path(os.environ["BANTIS_SECRETS_KEY_FILE"])
+            if os.environ.get("BANTIS_SECRETS_KEY_FILE") else None,
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),
         )

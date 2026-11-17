@@ -770,3 +770,5 @@ dialog { overflow-wrap: anywhere; }
 #provider-form input, #provider-form select { width: 100%; max-width: 600px; display: block; }
 #provider-form button { margin: 16px 8px 0 0; }
 #provider-view .analysis-panel { margin-bottom: 28px; }
+.permission-option { display: flex; align-items: center; gap: 0.75rem; }
+.permission-option input[type="checkbox"] { width: 1.1rem; min-width: 1.1rem; height: 1.1rem; min-height: 1.1rem; padding: 0; margin: 0; accent-color: var(--navy); }

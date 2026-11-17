@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from cryptography.fernet import Fernet
 
 from providers.base import UnavailableProvider
 from providers.claude import ClaudeProvider, from_environment
@@ -10,8 +11,19 @@ KEY = "test-private-anthropic-key"
 CONFIG = {"version": 1, "provider": "claude", "model": "claude-sonnet-5", "api_key": KEY}
 
 
+@pytest.fixture(autouse=True)
+def clear_external_key_path(monkeypatch):
+    monkeypatch.delenv("BANTIS_SECRETS_KEY_FILE", raising=False)
+
+
 def write(path, data):
-    path.write_text(json.dumps(data))
+    key_path = path.parent / ".secrets.key"
+    if not key_path.exists():
+        key_path.write_bytes(Fernet.generate_key())
+        key_path.chmod(0o600)
+    cipher = Fernet(key_path.read_bytes())
+    payload = json.dumps({"purpose": "ai-provider", "data": data}).encode()
+    path.write_text(json.dumps({"version": 2, "ciphertext": cipher.encrypt(payload).decode()}))
     path.chmod(0o600)
 
 
@@ -63,3 +75,51 @@ def test_missing_corrupt_or_public_file_is_unavailable(tmp_path, monkeypatch):
 def test_config_path_must_be_absolute():
     with pytest.raises(ValueError, match="unavailable or invalid"):
         load_provider_file("relative.json")
+
+def test_plaintext_provider_file_is_rejected(tmp_path, monkeypatch):
+    path = tmp_path / "ai-provider.json"
+    path.write_text(json.dumps(CONFIG))
+    path.chmod(0o600)
+    monkeypatch.setenv("BANTIS_AI_CONFIG", str(path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    assert isinstance(from_environment(), UnavailableProvider)
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong", "public", "symlink"])
+def test_unavailable_encryption_key_never_falls_back(tmp_path, monkeypatch, failure):
+    path = tmp_path / "ai-provider.json"
+    write(path, CONFIG)
+    key_path = tmp_path / ".secrets.key"
+    if failure == "missing":
+        key_path.unlink()
+    elif failure == "wrong":
+        key_path.write_bytes(Fernet.generate_key())
+    elif failure == "public":
+        key_path.chmod(0o644)
+    else:
+        alternate = tmp_path / "alternate-key"
+        key_path.rename(alternate)
+        key_path.symlink_to(alternate)
+    monkeypatch.setenv("BANTIS_AI_CONFIG", str(path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    assert isinstance(from_environment(), UnavailableProvider)
+
+
+def test_separate_private_key_path_is_supported(tmp_path, monkeypatch):
+    path = tmp_path / "ai-provider.json"
+    write(path, CONFIG)
+    key_path = tmp_path / "separate.key"
+    (tmp_path / ".secrets.key").rename(key_path)
+    monkeypatch.setenv("BANTIS_SECRETS_KEY_FILE", str(key_path))
+    assert load_provider_file(str(path)) == CONFIG
+
+
+def test_tampered_ciphertext_is_rejected(tmp_path):
+    path = tmp_path / "ai-provider.json"
+    write(path, CONFIG)
+    data = json.loads(path.read_text())
+    token = data["ciphertext"]
+    data["ciphertext"] = token[:60] + ("A" if token[60] != "A" else "B") + token[61:]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="unavailable or invalid"):
+        load_provider_file(str(path))

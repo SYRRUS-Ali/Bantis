@@ -12,7 +12,8 @@ from bantis_dashboard.main import create_app
 from bantis_dashboard.telegram_setup import TEST_MESSAGE
 from test_admin import CREATE, HEADERS
 from test_dashboard import ORIGIN, TOKEN
-from test_provider_setup import login
+from test_provider_setup import grant_permissions, login
+from bantis_dashboard.secret_store import SecretStore
 
 BOT_TOKEN = "123456789:telegram-fixture-token-private"
 INPUT = {"bot_token": BOT_TOKEN, "chat_id": "-100123456789"}
@@ -34,6 +35,7 @@ def telegram_stack(tmp_path):
     app = create_app(Settings(token=TOKEN, origin=ORIGIN, state_dir=directory),
                      transport=httpx.MockTransport(lambda _: httpx.Response(503)),
                      telegram_transport=httpx.MockTransport(handle))
+    grant_permissions(directory)
     with TestClient(app) as client:
         assert client.post("/api/setup/admin", json=CREATE, headers=HEADERS).status_code == 201
         yield client, directory, upstream
@@ -59,7 +61,9 @@ def test_test_message_private_save_and_redaction(telegram_stack, caplog):
     assert saved.status_code == 200 and BOT_TOKEN not in saved.text
     path = directory / "telegram.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert json.loads(path.read_text()) == {"version": 1, "enabled": True, **INPUT}
+    assert BOT_TOKEN not in path.read_text()
+    assert json.loads(path.read_text())["version"] == 2
+    assert SecretStore(directory).read("telegram")[0] == {"version": 1, "enabled": True, **INPUT}
     assert BOT_TOKEN not in client.get(URL).text
     assert client.post(URL, json=body, headers=HEADERS).status_code == 409
 
@@ -71,7 +75,7 @@ def test_skip_removes_token_without_a_network_request(telegram_stack):
     assert client.post(URL, json={"enabled": True, "test_id": receipt}, headers=HEADERS).status_code == 200
     skipped = client.post(URL, json={"enabled": False}, headers=HEADERS)
     assert skipped.json() == {"configured": True, "enabled": False, "chat_id": None, "has_token": False}
-    assert json.loads((directory / "telegram.json").read_text()) == {"version": 1, "enabled": False}
+    assert SecretStore(directory).read("telegram")[0] == {"version": 1, "enabled": False}
     assert len(upstream["requests"]) == 1
     assert client.post(URL, json={"enabled": True, "test_id": receipt}, headers=HEADERS).status_code == 409
 
@@ -196,14 +200,14 @@ def test_failed_save_preserves_selection_and_receipt(telegram_stack, monkeypatch
     def fail(*args):
         raise OSError(BOT_TOKEN)
 
-    monkeypatch.setattr("bantis_dashboard.telegram_setup.os.replace", fail)
+    monkeypatch.setattr("bantis_dashboard.secret_store.os.replace", fail)
     body = {"enabled": True, "test_id": receipt}
     result = client.post(URL, json=body, headers=HEADERS)
     assert result.status_code == 503 and BOT_TOKEN not in result.text
     assert client.get(URL).json()["enabled"] is False
-    monkeypatch.setattr("bantis_dashboard.telegram_setup.os.replace", original)
+    monkeypatch.setattr("bantis_dashboard.secret_store.os.replace", original)
     assert client.post(URL, json=body, headers=HEADERS).status_code == 200
-    assert sorted(p.name for p in directory.iterdir()) == ["admin.sqlite3", "telegram.json"]
+    assert sorted(p.name for p in directory.iterdir()) == [".secrets.key", "admin.sqlite3", "permissions.json", "telegram.json"]
 
 
 def test_restart_preserves_selection_but_not_receipts(telegram_stack):
@@ -224,7 +228,7 @@ def test_invalid_or_public_saved_file_is_unavailable(telegram_stack):
     client, directory, _ = telegram_stack
     login(client)
     path = directory / "telegram.json"
-    path.write_text(json.dumps({"version": 1, "enabled": True, **INPUT}))
+    SecretStore(directory).write("telegram", {"version": 1, "enabled": True, **INPUT})
     path.chmod(0o644)
     assert client.get(URL).status_code == 503
     path.chmod(0o600)

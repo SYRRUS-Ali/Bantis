@@ -582,9 +582,40 @@ def check_admin_setup(page, origin, token, screenshots):
     page.reload()
     expect(page.locator("#workspace")).to_be_visible()
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    check_permissions_setup(page, screenshots)
     check_provider_setup(page, origin)
     check_telegram_setup(page)
     page.goto(origin)
+
+
+def check_permissions_setup(page, screenshots):
+    expect(page.locator("#permissions-view")).to_be_visible()
+    expect(page.locator("#permissions-storage")).to_contain_text("Encrypted local storage: ready")
+    for field in ("#permission-ai", "#permission-telegram", "#permission-response"):
+        expect(page.locator(field)).not_to_be_checked()
+    expect(page.locator("#permissions-next")).to_be_disabled()
+    page.locator("#permissions-save").click()
+    expect(page.locator("#permissions-notice")).to_contain_text("Permissions saved")
+    page.reload()
+    expect(page.locator("#permissions-saved")).to_contain_text("permissions are saved")
+    for field in ("#permission-ai", "#permission-telegram", "#permission-response"):
+        expect(page.locator(field)).not_to_be_checked()
+        page.locator(field).check()
+    expect(page.locator("#permissions-next")).to_be_disabled()
+    page.locator("#permissions-save").click()
+    expect(page.locator("#permissions-notice")).to_contain_text("Permissions saved")
+    if screenshots:
+        page.screenshot(path=str(screenshots / "permissions-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if screenshots:
+        page.screenshot(path=str(screenshots / "permissions-mobile.png"), full_page=True)
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.locator("#permissions-next").click()
+    expect(page.locator("#provider-view")).to_be_visible()
+    page.locator("#provider-back").click()
+    expect(page.locator("#permission-ai")).to_be_checked()
+    page.locator("#permissions-next").click()
 
 
 def check_provider_setup(page, origin):
@@ -610,6 +641,7 @@ def check_provider_setup(page, origin):
     expect(page.locator("#provider-notice")).to_contain_text("Provider saved")
     expect(page.locator("#provider-saved")).to_contain_text("claude-different-model")
     page.reload()
+    page.locator("#permissions-next").click()
     expect(page.locator("#provider-saved")).to_contain_text("key stored")
     expect(page.locator("#provider-key")).to_have_value("")
     page.locator("#ai-provider").select_option("none")
@@ -652,6 +684,7 @@ def check_telegram_setup(page):
     expect(page.locator("#telegram-saved")).to_contain_text("-100987654321")
     expect(page.locator("#telegram-continue")).to_be_visible()
     page.reload()
+    page.locator("#permissions-next").click()
     page.locator("#setup-next").click()
     expect(page.locator("#telegram-saved")).to_contain_text("token stored")
     expect(page.locator("#telegram-token")).to_have_value("")
@@ -663,6 +696,7 @@ def check_telegram_setup(page):
     expect(page.locator("#telegram-saved")).to_contain_text("Telegram skipped")
     expect(page.locator("#telegram-continue")).to_be_visible()
     page.reload()
+    page.locator("#permissions-next").click()
     page.locator("#setup-next").click()
     expect(page.locator("#telegram-saved")).to_contain_text("Telegram skipped")
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
@@ -711,6 +745,7 @@ def main():
             **os.environ,
             "DASHBOARD_TOKEN": token,
             "DASHBOARD_STATE_DIR": admin_dir if args.admin_setup else "",
+            "BANTIS_SECRETS_KEY_FILE": "",
             "DASHBOARD_ORIGIN": origin,
             "DETECTION_ENGINE_URL": f"http://127.0.0.1:{upstream.server_port}",
             "DASHBOARD_POLL_SECONDS": "1",
@@ -877,7 +912,7 @@ def create_app():
                 assert not errors, errors
                 browser.close()
                 print(
-                    f"PASS: {'administrator wizard, AI provider, optional Telegram, and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    f"PASS: {'administrator wizard, permissions, encrypted storage, AI provider, optional Telegram, and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()

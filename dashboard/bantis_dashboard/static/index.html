@@ -76,6 +76,26 @@
 
     <main id="overview">
       <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="page-name">Overview</span></span><span id="workspace-mode" class="pill neutral">READ ONLY</span></header>
+      <section id="permissions-view" hidden aria-labelledby="permissions-title">
+        <div class="page-heading"><div><p class="eyebrow">SETUP / PERMISSIONS</p><h1 id="permissions-title">Choose dashboard permissions.</h1><p class="subtitle">Start with read-only access. Enable only the capabilities you need.</p></div></div>
+        <div class="analysis-panel">
+          <p id="permissions-saved" role="status"></p>
+          <form id="permissions-form">
+            <label class="permission-option" for="permission-ai"><input id="permission-ai" type="checkbox" disabled>Allow dashboard AI requests</label>
+            <p class="fine-print">Allows provider connection tests and follow-up questions sent through this dashboard. Recorded analysis remains readable. The separate Copilot worker keeps its own host configuration.</p>
+            <label class="permission-option" for="permission-telegram"><input id="permission-telegram" type="checkbox" disabled>Allow Telegram test messages</label>
+            <p class="fine-print">Allows a fixed setup message to be sent to your chosen Telegram chat. Automatic incident notifications are not available yet.</p>
+            <label class="permission-option" for="permission-response"><input id="permission-response" type="checkbox" disabled>Allow manual response decisions</label>
+            <p id="permissions-response-help" class="fine-print">Approve, Modify, and Dismiss still require the controller's separate operator secret and policy checks. This permission does not enable live or automatic execution.</p>
+            <button id="permissions-save" class="primary" type="submit" disabled>Save permissions</button>
+          </form>
+          <p id="permissions-storage" role="status"></p>
+          <p class="fine-print">Provider keys and Telegram tokens are encrypted on this host. Keep the encryption key private and back it up separately from configuration files. Losing the key prevents recovery; someone with both the key and the files can read the secrets.</p>
+          <p id="permissions-notice" role="status" aria-live="polite"></p>
+          <button id="permissions-refresh" class="secondary" type="button">Refresh permissions and storage</button>
+          <p><button id="permissions-next" class="secondary" type="button" disabled>Next: AI provider →</button></p>
+        </div>
+      </section>
       <section id="provider-view" hidden aria-labelledby="provider-title">
         <div class="page-heading"><div><p class="eyebrow">SETUP / AI PROVIDER</p><h1 id="provider-title">Choose your AI provider.</h1><p class="subtitle">Claude is the supported provider in this version. AI is optional; detection works without it.</p></div></div>
         <div class="analysis-panel">
@@ -94,6 +114,7 @@
           <p id="provider-notice" role="status" aria-live="polite"></p>
           <button id="provider-refresh" class="secondary" type="button">Refresh saved configuration</button>
           <p class="fine-print">Saved keys stay in the private server configuration and are never returned here. Start or restart the Copilot worker and API with BANTIS_AI_CONFIG pointing to ai-provider.json in your dashboard state directory. Provider setup does not change response permissions or execution mode.</p>
+          <p><button id="provider-back" class="secondary" type="button">← Back to permissions</button></p>
           <p><button id="setup-next" class="secondary" type="button">Next: optional Telegram →</button></p>
         </div>
       </section>

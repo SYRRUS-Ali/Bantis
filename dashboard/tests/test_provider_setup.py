@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from bantis_dashboard.config import Settings
 from bantis_dashboard.main import create_app
+from bantis_dashboard.secret_store import SecretStore
 from test_admin import CREATE, HEADERS, PASSWORD
 from test_dashboard import ORIGIN, TOKEN
 
@@ -32,9 +33,15 @@ def provider_stack(tmp_path):
     app = create_app(Settings(token=TOKEN, origin=ORIGIN, state_dir=directory),
                      transport=httpx.MockTransport(lambda _: httpx.Response(503)),
                      provider_transport=httpx.MockTransport(handle))
+    grant_permissions(directory)
     with TestClient(app) as client:
         assert client.post("/api/setup/admin", json=CREATE, headers=HEADERS).status_code == 201
         yield client, directory, upstream
+
+
+def grant_permissions(directory):
+    SecretStore(directory).write("permissions", {"version": 1, "ai_requests": True,
+                                                 "telegram_messages": True, "response_decisions": False})
 
 
 def login(client):
@@ -63,7 +70,9 @@ def test_real_provider_request_and_test_bound_private_save(provider_stack):
     assert saved.status_code == 200 and KEY not in saved.text
     path = directory / "ai-provider.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert json.loads(path.read_text()) == {"version": 1, **INPUT}
+    assert KEY not in path.read_text()
+    assert json.loads(path.read_text())["version"] == 2
+    assert SecretStore(directory).read("ai-provider")[0] == {"version": 1, **INPUT}
     # Verify the actual saved format with the independent Copilot reader.
     reader = Path(__file__).resolve().parents[2] / "ai-copilot/providers/configuration.py"
     load = runpy.run_path(str(reader))["load_provider_file"]
@@ -132,7 +141,7 @@ def test_none_is_saved_without_a_provider_call_and_removes_key(provider_stack):
     receipt = client.post(URL + "/test", json=INPUT, headers=HEADERS).json()["test_id"]
     assert client.post(URL, json={"provider": "claude", "test_id": receipt}, headers=HEADERS).status_code == 200
     assert client.post(URL, json={"provider": "none"}, headers=HEADERS).status_code == 200
-    assert json.loads((directory / "ai-provider.json").read_text()) == {"version": 1, "provider": "none"}
+    assert SecretStore(directory).read("ai-provider")[0] == {"version": 1, "provider": "none"}
     assert len(upstream["requests"]) == 1
 
 
@@ -177,13 +186,13 @@ def test_failed_save_preserves_previous_selection_and_can_be_retried(provider_st
     def fail(*args):
         raise OSError("private storage error")
 
-    monkeypatch.setattr("bantis_dashboard.provider_setup.os.replace", fail)
+    monkeypatch.setattr("bantis_dashboard.secret_store.os.replace", fail)
     response = client.post(URL, json={"provider": "claude", "test_id": receipt}, headers=HEADERS)
     assert response.status_code == 503 and "private storage error" not in response.text
     assert client.get(URL).json()["provider"] == "none"
-    monkeypatch.setattr("bantis_dashboard.provider_setup.os.replace", original)
+    monkeypatch.setattr("bantis_dashboard.secret_store.os.replace", original)
     assert client.post(URL, json={"provider": "claude", "test_id": receipt}, headers=HEADERS).status_code == 200
-    assert sorted(path.name for path in directory.iterdir()) == ["admin.sqlite3", "ai-provider.json"]
+    assert sorted(path.name for path in directory.iterdir()) == [".secrets.key", "admin.sqlite3", "ai-provider.json", "permissions.json"]
 
 
 def test_restart_keeps_saved_selection_and_discards_test_receipts(provider_stack):
