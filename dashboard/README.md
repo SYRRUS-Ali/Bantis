@@ -9,7 +9,8 @@ database; optional administrator setup uses a private local SQLite database.
 This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
 still requires the agreed diagrams. The wizard supports administrator creation
-and optional AI provider and Telegram steps with real connection tests. Other service
+dashboard capability permissions, encrypted local secret storage, and optional
+AI provider and Telegram steps with real connection tests. Other service
 configuration steps, emergency stop, and resume remain open.
 Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
@@ -52,6 +53,7 @@ reports the source as unavailable. No demo incidents are generated.
 |---|---|---|
 | `DASHBOARD_TOKEN` | Required | Dashboard credential in token-only mode; setup bootstrap token in administrator mode. 32–512 bytes; never use a controller approver secret. |
 | `DASHBOARD_STATE_DIR` | Optional | Absolute path to a private, operator-owned directory. Enables first-run administrator creation and account sign-in. Without it, token-only mode remains available. |
+| `BANTIS_SECRETS_KEY_FILE` | `$DASHBOARD_STATE_DIR/.secrets.key` | Optional absolute path to an existing private Fernet key. Set the same path in Copilot. An explicitly configured missing key is never generated. |
 | `DASHBOARD_ORIGIN` | `http://127.0.0.1:8200` | Exact browser origin, without a path, query, or credentials. Used for host and browser origin checks. |
 | `DETECTION_ENGINE_URL` | `http://127.0.0.1:8000` | Server-side upstream address; never supplied by browser requests. |
 | `COPILOT_API_URL` | `http://127.0.0.1:8100` | Server-side Copilot API address. |
@@ -88,7 +90,7 @@ Creation finishes this wizard step and opens administrator sign-in. Sign in
 with the new username and password to access the existing dashboard. This does
 not report completion of the remaining wizard steps: connections and response
 configuration still use host settings. Open **Setup** after signing in to select
-an AI provider and configure or skip Telegram. Administrator login never supplies the
+permissions, then select an AI provider and configure or skip Telegram. Administrator login never supplies the
 separate controller approval secret or changes execution mode.
 
 Account state persists in `$DASHBOARD_STATE_DIR/admin.sqlite3`. A singleton
@@ -124,9 +126,102 @@ There is no browser account-reset or password-recovery endpoint. Back up the
 private state and investigate storage failures on the host; do not delete an
 established account database to resolve an ordinary sign-in error.
 
+## Permissions and encrypted storage
+
+Sign in as administrator and open **Setup** (`http://127.0.0.1:8200/setup`).
+The first screen is **Choose dashboard permissions**. Save the defaults for
+read-only dashboard access, or explicitly enable individual capabilities:
+
+| Permission | Scope |
+|---|---|
+| Allow dashboard AI requests | Provider connection tests, saving tested provider credentials, and new follow-up questions through this dashboard. Recorded analysis and history remain readable. The separate Copilot worker keeps its host configuration. |
+| Allow Telegram test messages | The optional Telegram setup test and saving tested bot credentials. Skipping Telegram is always available. |
+| Allow manual response decisions | Dashboard Approve, Modify, and Dismiss requests. The host must also enable `DASHBOARD_RESPONSE_ENABLED`; the separate controller secret and all existing controller policy still apply. |
+
+All three permissions default to off in administrator mode, including after an
+upgrade with existing integration settings. Saving permissions takes effect on
+subsequent dashboard requests, clears earlier provider/Telegram test receipts,
+and rejects test results arriving after a permission change. An already sent
+remote request or controller operation may still finish. These controls never
+write controller action allowlists, dry-run settings, automatic execution flags,
+or kill-switch state. Token-only deployments retain their existing host-configured
+behavior and cannot use this administrator-only step.
+
+The screen reports whether encrypted storage and private file permissions are
+ready. Choose **Save permissions**, then **Next: AI provider**. Use **Back to
+permissions** to revise choices. Reloading starts at Permissions with saved
+choices restored. Errors keep the screen available for checking storage and
+retrying; a storage failure cannot silently grant a capability.
+
+Wizard configuration uses [Fernet authenticated encryption](https://cryptography.io/en/latest/fernet/)
+through `cryptography`: AES-128-CBC with HMAC-SHA256. `ai-provider.json`,
+`telegram.json`, and `permissions.json` contain version-2 ciphertext envelopes.
+The encrypted payload includes a document purpose, so copying provider ciphertext
+into a permissions or Telegram file fails validation. Decrypted values stay in
+server memory and are never returned as secrets to the browser. Administrator
+passwords remain salted scrypt hashes, separate from reversible integration
+credentials. Environment-only bootstrap, service, and controller secrets are
+not copied into this store.
+
+The dashboard generates a random key at `$DASHBOARD_STATE_DIR/.secrets.key` on
+first use. It publishes the complete key atomically without overwriting an
+existing key, writes key/configuration files as `0600`, and requires private
+operator-owned `0700` directories. Reads reject symlinks, non-regular files,
+oversized documents, public files, invalid ciphertext, and wrong keys. Saves
+use a temporary encrypted file, file sync, atomic replacement, and directory
+sync. Failures before replacement preserve the previous file; refresh after
+uncertain delivery before retrying.
+
+Keep the key private and back it up separately from encrypted configuration.
+For a separately provisioned key, set `BANTIS_SECRETS_KEY_FILE` to its absolute
+path in both dashboard and Copilot processes. The file must contain a Fernet key
+(a URL-safe base64-encoded 32-byte random key), be owned by the service user, and
+have mode `0600` inside a private directory. An explicitly configured key must
+already exist. Do not replace the key to fix a startup error: there is no browser
+reset or automatic key regeneration when encrypted files exist. Restore the
+original key and correct permissions. Key rotation requires an explicit offline
+migration and is not provided by this step.
+
+At startup the dashboard validates and migrates earlier private version-1
+provider and Telegram files to encryption, preserving the filenames and
+selection. Migration is atomic per file, creates no plaintext backup, and can
+resume after interruption with the same key. Invalid or public legacy files
+stop startup rather than being silently rewritten. Historical backups and disk
+remnants are not erased by migration. Start the updated dashboard before
+restarting Copilot so it can migrate old provider settings. Copilot requires
+the encrypted format and original key when `BANTIS_AI_CONFIG` is set; it never
+falls back to an environment key after decryption failure.
+
+Encryption protects ciphertext without its key. A user or process that can read
+both the key and configuration can recover secrets; it does not protect against
+a compromised service account or host. Keep state outside the repository and
+continue to restrict the dashboard to loopback or authenticated TLS ingress.
+
+### Run and inspect this step
+
+From the repository root, update the dashboard dependencies:
+
+```bash
+dashboard/.venv/bin/python -m pip install -r dashboard/requirements.txt
+export DASHBOARD_STATE_DIR="$HOME/.local/state/bantis-dashboard"
+export DASHBOARD_ORIGIN=http://127.0.0.1:8200
+printf 'Dashboard bootstrap token (32–512 bytes): '
+read -r -s DASHBOARD_TOKEN
+printf '\n'
+export DASHBOARD_TOKEN
+cd dashboard
+.venv/bin/python -m uvicorn bantis_dashboard.main:create_app --factory --host 127.0.0.1 --port 8200 --workers 1
+```
+
+Create the administrator if prompted, sign in, and open **Setup → Permissions**.
+The screen works while the Detection Engine is offline. For incident data, start
+the [Detection Engine](../detection-engine/README.md#running-it) on port 8000;
+Copilot remains optional. Use the same persistent state directory after restart.
+
 ## AI provider setup
 
-With administrator mode enabled, sign in and open **Setup** (`/setup`). Select
+With administrator mode enabled, open **Setup** (`/setup`), enable dashboard AI
+requests in Permissions, save, and choose **Next: AI provider**. Select
 **Claude (Anthropic)**, enter a model ID available to your account and an API key,
 then choose **Test connection**. Claude is the implemented v1 provider; OpenAI
 and local providers are not advertised as available.
@@ -149,8 +244,8 @@ discarded after save, logout, session rotation, restart, or expiry cleanup
 (every 30 seconds). Expired or foreign-session receipts cannot be saved.
 
 Saving atomically writes `$DASHBOARD_STATE_DIR/ai-provider.json` with mode `0600`
-in the existing private directory. The file contains the API key in plaintext
-for the Copilot to use; protect it and its backups as credentials. Retrieval
+in the existing private directory. The file encrypts the API key and model using
+the local storage key; protect the key and back it up separately. Retrieval
 returns only provider, model, and whether a key is stored. No key is returned to
 the browser or written to browser storage. Select **No AI provider** and save
 to remove the stored key and continue without AI; no connection request occurs.
@@ -174,13 +269,14 @@ entire wizard complete.
 
 ## Optional Telegram setup
 
-In administrator mode, open **Setup**, then **Next: optional Telegram** after
+In administrator mode, open **Setup**, save Permissions, then choose **Next:
+AI provider** followed by **Next: optional Telegram** after
 the AI provider step. Choose **Skip Telegram** and **Skip Telegram and continue**
 to save an explicit disabled selection without a token or network request. This
 also removes any previously stored bot token. Detection and the dashboard work
 without Telegram. **Back to AI provider** preserves the chat ID during navigation.
 
-To configure Telegram, create a bot using Telegram's BotFather. Start a private
+To configure Telegram, first allow Telegram test messages in Permissions. Create a bot using Telegram's BotFather. Start a private
 chat with it, or add it to the target group or channel and allow it to send
 messages. Enter its bot token and a numeric chat ID (preserve the minus sign for
 groups), or a public channel username such as `@my_channel`. Choose **Send test
@@ -195,14 +291,15 @@ requires a new test. Tests have a separate limit of 10 per rolling minute and
 are never automatically retried. A timeout can occur after delivery; check the
 chat before manually retrying. Invalid tokens, inaccessible chats, rate limits,
 malformed replies, and outages show sanitized English errors and cannot save an
-enabled configuration. Failed saves preserve the previous file; refresh saved
+enabled configuration. Failures before atomic replacement preserve the previous file; refresh saved
 configuration after interrupted delivery before retrying.
 
 Saving atomically writes `$DASHBOARD_STATE_DIR/telegram.json` with mode `0600`
-inside the existing private directory. Enabled settings contain `version: 1`,
-`enabled: true`, `bot_token`, and `chat_id`. A skipped selection contains only
-`version: 1` and `enabled: false`. The token is plaintext for future server-side
-use; protect this file and its backups. Retrieval returns only configured and
+inside the existing private directory. The version-2 envelope encrypts the
+selection and credentials. Its decrypted payload contains `version: 1`,
+`enabled: true`, `bot_token`, and `chat_id`; a skipped payload contains only
+`version: 1` and `enabled: false`. Protect the original encryption key and
+back it up separately from this file. Retrieval returns only configured and
 enabled flags, the chat ID, and whether a token exists. The token field clears
 on test submission and logout, and credentials never enter browser storage.
 HTTPX request logs redact the token required in Telegram's upstream API path.
@@ -225,6 +322,8 @@ change controller permissions, or enable response actions.
 | `GET /api/setup` | Public | Reports whether administrator mode is enabled and an account exists; returns no account details. |
 | `POST /api/setup/admin` | Bootstrap token + exact Origin | Creates the single administrator once; returns 409 after account creation. Does not issue a session. |
 | `POST /api/admin/session` | Administrator credentials + exact Origin | Creates the existing opaque session cookie in administrator mode. |
+| `GET /api/setup/permissions` | Administrator session | Saved capability choices and encrypted storage readiness. |
+| `POST /api/setup/permissions` | Administrator session + exact Origin | Saves encrypted capability choices; clears previous integration test receipts. |
 | `GET /api/setup/provider` | Administrator session | Redacted saved provider selection. Requires administrator mode. |
 | `POST /api/setup/provider/test` | Administrator session + exact Origin | One real connection test; returns a session-bound receipt on success. |
 | `POST /api/setup/provider` | Administrator session + exact Origin | Saves a tested selection, or disables AI without a provider request. |
@@ -524,7 +623,8 @@ Audit checks use a disposable journal and cover
 filters, stable pagination during appends, event details, integrity failure,
 unavailability, empty history, mobile layout, and sign-out. Screenshots contain
 synthetic test incidents, events, and audit entries.
-The `--admin-setup` variant also checks Telegram testing, changed-chat invalidation,
+The `--admin-setup` variant checks Permissions defaults, save/reload, Back
+navigation, mobile layout, and encrypted storage readiness. It also checks Telegram testing, changed-chat invalidation,
 private save, reload, back navigation, skipping, mobile layout, and logout using
 fixture responses. No real Telegram messages are sent. It also covers password
 confirmation, invalid bootstrap authentication, secret clearing, account creation, setup
@@ -538,3 +638,10 @@ rate limiting, logout, and WebSocket revocation.
 CI runs API/WebSocket tests on Python 3.12 and 3.14, checks JavaScript syntax,
 and includes Detection Engine tests and real query integration in the end-to-end job. Browser
 checks are optional and are not configured as a CI job.
+Encryption and capability coverage is in `tests/test_secret_store.py` and
+`tests/test_permissions_setup.py`. It checks key loss and replacement, tampering,
+private permissions, unsafe file types, atomic failures, concurrent key creation,
+legacy migration, cross-document substitution, request enforcement, revocation,
+and in-flight test invalidation. All tests use disposable state and fixture
+external APIs. Run them with `range/.venv/bin/python -m pytest dashboard/tests -q`
+from the repository root.

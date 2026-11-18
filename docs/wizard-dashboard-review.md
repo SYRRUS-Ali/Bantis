@@ -1,7 +1,7 @@
 # Wizard and Dashboard Design Review
 
 Review against the [design baseline](wizard-dashboard-design.md). This checklist
-is acceptance guidance for the full UI. The administrator, AI provider, and optional Telegram steps and existing
+is acceptance guidance for the full UI. The administrator, Permissions, AI provider, and optional Telegram steps and existing
 dashboard have executable tests; the remaining wizard steps are future work.
 
 ## Reference review before design freeze
@@ -29,6 +29,9 @@ implementation requirements.
 | Finish setup | Actions remain disabled, dry run stays enabled, and automatic response stays off. |
 | Reload or second setup session | Transactional singleton creation prevents overwriting an established administrator. A completed creation shows sign-in; an interrupted transaction can be retried after checking setup status. |
 | Administrator authentication | Creation requires the bootstrap token and exact Origin; subsequent access requires the stored account credentials. Token login cannot bypass administrator mode. |
+| Permissions | Optional capabilities default off in administrator mode. Save/reload preserves choices; unauthorized or cross-origin writes fail. Revoking a capability blocks subsequent requests and invalidates earlier integration tests, including in-flight results. |
+| Controller boundary | Enabling manual decisions requires host-enabled review and keeps the separate operator secret and controller policy. No action, dry-run, automatic-execution, or stop settings are written. |
+| Encrypted storage | Ciphertext contains no plaintext integration secrets. Private key/configuration files survive restart; wrong, missing, public, symlinked, or tampered files fail closed without replacing the key. Valid legacy provider/Telegram files migrate atomically. |
 | Provider connection | Claude testing sends a real bounded provider request; invalid keys, inaccessible models, timeouts, malformed responses, and rate limits cannot report success. Tests are not retried automatically. |
 | Provider save | Saving Claude requires an unexpired test receipt from the same session. Changed settings require a new test. No AI can be saved without credentials or a network request. |
 | Provider secrets and restart | Keys are absent from retrieval, errors, and browser storage. Private saved settings survive restart and are loaded by Copilot at startup; invalid files cannot silently fall back to an environment key. |
@@ -90,3 +93,11 @@ coverage in the `--admin-setup` variant. Automated tests use Telegram fixture
 responses and send no real messages. To check actual delivery, use **Send test
 message** with your own bot and chat, confirm the fixed message arrived, then
 save or skip the optional integration.
+
+Permissions and encryption coverage is in
+[test_permissions_setup.py](../dashboard/tests/test_permissions_setup.py),
+[test_secret_store.py](../dashboard/tests/test_secret_store.py), and the updated
+Copilot configuration tests. The browser variant begins at **Setup → Permissions**
+and verifies defaults, save/reload, navigation, readiness status, and mobile layout.
+See [run and inspect instructions](../dashboard/README.md#run-and-inspect-this-step)
+for a local walkthrough.

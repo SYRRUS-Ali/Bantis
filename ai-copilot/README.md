@@ -70,8 +70,18 @@ them. Both load the saved selection at startup. The file overrides
 `ANTHROPIC_API_KEY`; an explicit opt-out or invalid configuration never falls
 back to the environment key. The file must be owned by the Copilot OS user and
 have no group or other permissions. Run both services under the same trusted
-OS account, with access to the private directory. The key is operational
-plaintext in this file; keep it and backups private.
+OS account, with access to the private directory. The version-2 file uses
+Fernet authenticated encryption. The original `.secrets.key` must be available
+beside it, or set the same absolute `BANTIS_SECRETS_KEY_FILE` in dashboard and
+Copilot processes. Keys and their parent directories must also be private.
+Back up the encryption key separately from the encrypted configuration.
+
+Upgrade the dashboard and start it once to migrate older plaintext wizard files
+before restarting Copilot. The updated reader rejects plaintext, invalid
+ciphertext, wrong or missing keys, and unsafe file permissions without falling
+back to another key. See [Permissions and encrypted storage](../dashboard/README.md#permissions-and-encrypted-storage)
+for migration and recovery. The Permissions step controls dashboard requests;
+the separately running Copilot worker retains its host configuration.
 
 Without `BANTIS_AI_CONFIG`, the existing environment-based setup remains
 unchanged. Wizard connection tests send a fixed minimal prompt, incur provider

@@ -12,7 +12,9 @@ persistent account storage, and administrator sign-in. The AI provider step
 supports Claude or no AI, a real connection test, and private configuration
 persistence consumed by Copilot on startup. The optional Telegram step supports a
 real test message, session-bound test-before-save, private persistence, and explicit
-skipping without credentials. Other wizard steps remain open. All interface copy and
+skipping without credentials. The Permissions step controls dashboard AI requests,
+Telegram tests, and manual response decisions with explicit opt-in. Wizard secrets
+now use authenticated local encryption, including legacy-file migration. Other wizard steps remain open. All interface copy and
 documentation must be in English.
 
 ## Design references and freeze criteria
@@ -58,7 +60,8 @@ grouping, and placement await the agreed wizard diagram.
 ```mermaid
 flowchart TD
     A[Deployment prerequisites] --> B[Administrator setup]
-    B --> C[Service connections]
+    B --> P[Permissions and encrypted local storage]
+    P --> C[Service connections]
     C --> D[Optional Copilot configuration]
     D --> T[Optional Telegram connection]
     T --> E[Review configuration and checks]
@@ -71,6 +74,7 @@ flowchart TD
 |---|---|
 | Prerequisites | Explain the single-environment scope and check required services; identify failed checks individually. |
 | Administrator setup | Implemented when `DASHBOARD_STATE_DIR` is configured: bootstrap-authenticated creation of one persistent administrator, followed by account sign-in. Uses a separate account from the range application and a separate secret from controller approval. |
+| Permissions and secret storage | Implemented in administrator mode: explicit capability opt-in, server-side enforcement, controller authorization kept separate, authenticated encrypted configuration, private local key, and migration of legacy provider/Telegram settings. No live or automatic execution toggles. |
 | Service connections | Validate addresses and connectivity; distinguish reachable, unavailable, and unconfigured services. Connectivity alone does not prove authentication or deployment readiness. |
 | Copilot configuration | Implemented for Claude or no AI: administrator-authorized connection test, session-bound test receipt, private save, and redacted retrieval. Tests send only a fixed minimal prompt and may incur charges. Copilot loads saved settings on startup; operational service connectivity remains separate. |
 | Telegram configuration | Implemented in administrator mode: configure a bot token and chat, send one real test message, then save tested credentials with a session-bound receipt; or explicitly skip without credentials or a network request. Automatic incident notifications remain future work. |
@@ -143,6 +147,7 @@ resume and approval invalidation remain unimplemented.
 | Follow-up conversation | Copilot `GET` and `POST /incidents/{id}/questions` | Dashboard session integration is implemented; service bearer tokens stay server-side. See [Copilot guide](../ai-copilot/README.md). |
 | Setup administrator | Dashboard `GET /api/setup`, `POST /api/setup/admin`, and `POST /api/admin/session` | Implemented with bootstrap authorization, exact Origin checks, a private SQLite singleton, password hashing, rate limits, and the existing session lifecycle. |
 | AI provider selection | Dashboard `GET`/`POST /api/setup/provider` and `POST /api/setup/provider/test`; Copilot `BANTIS_AI_CONFIG` | Implemented for Claude or no AI, real server-side testing, receipts bound to tested credentials and session, private atomic persistence, and startup consumption by worker and API. |
+| Permissions and encrypted storage | Dashboard `GET`/`POST /api/setup/permissions`; private local Fernet key | Implemented with default-off optional capabilities, request enforcement, receipt invalidation, authenticated encrypted persistence, and legacy migration; separate controller policy remains authoritative. |
 | Optional Telegram | Dashboard `GET`/`POST /api/setup/telegram` and `POST /api/setup/telegram/test` | Implemented with one real test message, session-bound receipts, private atomic persistence, redacted retrieval, and explicit skip; automatic incident delivery remains open. |
 | Remaining setup steps | Host environment configuration | Service configuration, checks, configuration persistence, and wizard completion remain open. |
 | Audit history | Session-protected dashboard `GET /api/audit-log` reads a configured local controller journal in read-only mode | Implemented with full-chain local verification, selected fields, exact filters, and pagination; independent anchoring remains open. |
