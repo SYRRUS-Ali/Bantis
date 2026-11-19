@@ -1,0 +1,162 @@
+# The dashboard coordinates this stack from the host; no Docker socket is mounted.
+name: bantis-platform
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+x-copilot: &copilot
+  image: "${BANTIS_IMAGE_PREFIX:-bantis}-copilot:local"
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    target: copilot
+  user: "${BANTIS_RUNTIME_UID:-1000}:${BANTIS_RUNTIME_GID:-1000}"
+  profiles: [ai]
+  restart: unless-stopped
+  init: true
+  environment:
+    DETECTION_ENGINE_URL: http://detection-engine:8000
+    BANTIS_AI_CONFIG: /run/bantis/ai-provider.json
+    BANTIS_SECRETS_KEY_FILE: "/run/bantis-key/${BANTIS_ORCHESTRATION_KEY_NAME:-.secrets.key}"
+    BANTIS_DECISION_LOG: /data/decision_log.db
+    BANTIS_COPILOT_TOKEN_CONFIG: /run/bantis/orchestration.json
+  volumes:
+    - type: bind
+      source: "${BANTIS_ORCHESTRATION_STATE:-/nonexistent}/copilot-data"
+      target: /data
+      bind: {create_host_path: false}
+    - type: bind
+      source: "${BANTIS_ORCHESTRATION_STATE:-/nonexistent}"
+      target: /run/bantis
+      read_only: true
+      bind: {create_host_path: false}
+    - type: bind
+      source: "${BANTIS_ORCHESTRATION_KEY_DIR:-/nonexistent}"
+      target: /run/bantis-key
+      read_only: true
+      bind: {create_host_path: false}
+  depends_on:
+    detection-engine: {condition: service_healthy}
+  networks: [app-network]
+  logging: *bounded-logging
+
+services:
+  detection-engine:
+    image: "${BANTIS_IMAGE_PREFIX:-bantis}-detection:local"
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: detection
+    user: "${BANTIS_RUNTIME_UID:-1000}:${BANTIS_RUNTIME_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: sqlite:////data/events.db
+    volumes:
+      - type: bind
+        source: "${BANTIS_ORCHESTRATION_STATE:-/nonexistent}/detection-data"
+        target: /data
+        bind: {create_host_path: false}
+    ports: ["127.0.0.1:${BANTIS_DETECTION_PORT:-8000}:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [app-network]
+    logging: *bounded-logging
+
+  copilot-api:
+    <<: *copilot
+    ports: ["127.0.0.1:${BANTIS_COPILOT_PORT:-8100}:8100"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  copilot-worker:
+    <<: *copilot
+    command: [python, worker.py]
+    # The worker has no health endpoint; orchestration reports it as running.
+
+  api:
+    image: "${BANTIS_IMAGE_PREFIX:-bantis}-range-api:local"
+    build: {context: ./range/api}
+    profiles: [range]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-}"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"
+      ACCESS_TOKEN_EXPIRE_MINUTES: "${ACCESS_TOKEN_EXPIRE_MINUTES:-30}"
+      REDIS_URL: "${REDIS_URL:-}"
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-60}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      DETECTION_ENGINE_URL: http://detection-engine:8000
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      detection-engine: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks: [app-network]
+    logging: *bounded-logging
+
+  db:
+    image: postgres:16-alpine
+    profiles: [range]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_DB: "${POSTGRES_DB:-}"
+    volumes: [db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks: [app-network]
+    logging: *bounded-logging
+
+  redis:
+    image: redis:7-alpine
+    profiles: [range]
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+    command: [sh, -c, 'exec redis-server --requirepass "$$REDIS_PASSWORD"']
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks: [app-network]
+    logging: *bounded-logging
+
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: [range]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${BANTIS_RANGE_PORT:-8080}:80"]
+    volumes: [./range/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/health]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks: [app-network]
+    logging: *bounded-logging
+
+volumes:
+  db-data:
+networks:
+  app-network:

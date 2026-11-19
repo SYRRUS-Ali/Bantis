@@ -36,12 +36,17 @@ class Settings:
     response_enabled: bool = False
     state_dir: Path | None = None
     secrets_key_file: Path | None = None
+    orchestration_enabled: bool = False
+    orchestration_range: bool = True
+    orchestration_range_port: int = 8080
 
     def __post_init__(self):
         if self.state_dir is not None and not self.state_dir.is_absolute():
             raise ValueError("DASHBOARD_STATE_DIR must be an absolute path to a private directory")
         if self.secrets_key_file is not None and not self.secrets_key_file.is_absolute():
             raise ValueError("BANTIS_SECRETS_KEY_FILE must be an absolute path")
+        if type(self.orchestration_range_port) is not int or not 1 <= self.orchestration_range_port <= 65535:
+            raise ValueError("DASHBOARD_RANGE_PORT must be between 1 and 65535")
         if not 32 <= len(self.token.encode()) <= 512:
             raise ValueError("DASHBOARD_TOKEN must contain 32–512 bytes")
         object.__setattr__(self, "origin", validate_url(self.origin, origin=True))
@@ -78,5 +83,8 @@ class Settings:
             if os.environ.get("DASHBOARD_STATE_DIR") else None,
             secrets_key_file=Path(os.environ["BANTIS_SECRETS_KEY_FILE"])
             if os.environ.get("BANTIS_SECRETS_KEY_FILE") else None,
+            orchestration_enabled=os.environ.get("DASHBOARD_ORCHESTRATION_ENABLED", "false").lower() == "true",
+            orchestration_range=os.environ.get("DASHBOARD_ORCHESTRATION_RANGE", "true").lower() == "true",
+            orchestration_range_port=int(os.environ.get("DASHBOARD_RANGE_PORT", "8080")),
             poll_seconds=float(os.environ.get("DASHBOARD_POLL_SECONDS", "5")),
         )

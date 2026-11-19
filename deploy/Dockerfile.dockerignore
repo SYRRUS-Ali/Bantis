@@ -1,0 +1,13 @@
+**
+!deploy/
+!deploy/Dockerfile
+!detection-engine/
+!detection-engine/requirements.txt
+!detection-engine/app/
+!detection-engine/app/**
+!ai-copilot/
+!ai-copilot/requirements.txt
+!ai-copilot/*.py
+!ai-copilot/providers/
+!ai-copilot/providers/*.py
+**/__pycache__/

@@ -10,6 +10,8 @@ on:
       - 'ai-copilot/**'
       - 'response-controller/**'
       - 'dashboard/**'
+      - 'compose.yaml'
+      - 'deploy/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
   pull_request:
@@ -21,6 +23,8 @@ on:
       - 'ai-copilot/**'
       - 'response-controller/**'
       - 'dashboard/**'
+      - 'compose.yaml'
+      - 'deploy/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:

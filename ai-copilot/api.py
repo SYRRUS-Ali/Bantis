@@ -294,6 +294,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
 
     token = os.environ.get("COPILOT_API_TOKEN", "")
+    if token_path := os.environ.get("BANTIS_COPILOT_TOKEN_CONFIG"):
+        from providers.configuration import load_api_token_file
+
+        try:
+            token = load_api_token_file(token_path)
+        except ValueError:
+            print("Encrypted Copilot API credential is unavailable or invalid", file=sys.stderr)
+            return 2
     if len(token) < MIN_TOKEN_LENGTH:
         print(
             f"COPILOT_API_TOKEN must be set to at least {MIN_TOKEN_LENGTH} characters, e.g.\n"

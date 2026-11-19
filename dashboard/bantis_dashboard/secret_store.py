@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from .admin import AdminError
 
 KEY_NAME = ".secrets.key"
-NAMES = {"ai-provider", "telegram", "permissions"}
+NAMES = {"ai-provider", "telegram", "permissions", "orchestration"}
 
 
 def private_read(path: Path, limit: int = 16384) -> bytes:

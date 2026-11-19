@@ -35,6 +35,7 @@ from .response import Decision, ResponseController
 from .provider_setup import ProviderSave, ProviderSetup, ProviderTest
 from .permissions_setup import PermissionsSave, PermissionsSetup
 from .secret_store import SecretStore
+from .orchestration import Orchestrator, StartServices
 from .telegram_setup import TelegramSave, TelegramSetup, TelegramTest
 
 STATIC = Path(__file__).parent / "static"
@@ -109,7 +110,7 @@ class StatusFeed:
 
 def create_app(
     settings: Settings | None = None, *, transport=None, copilot_transport=None,
-    provider_transport=None, telegram_transport=None,
+    provider_transport=None, telegram_transport=None, orchestration_runner=None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     sessions = Sessions(settings.session_seconds)
@@ -126,6 +127,10 @@ def create_app(
     for service in setup_services:
         service.migrate()
 
+    orchestration = Orchestrator(settings, secret_store, permissions, provider_setup, telegram_setup,
+                                 runner=orchestration_runner) if admin and settings.orchestration_enabled else None
+    copilot_token = orchestration.copilot_token if orchestration else settings.copilot_token
+
     @asynccontextmanager
     async def lifespan(app):
         async with (
@@ -138,8 +143,8 @@ def create_app(
             ) as client,
             httpx.AsyncClient(
                 base_url=settings.copilot_url + "/",
-                headers={"Authorization": f"Bearer {settings.copilot_token}"}
-                if settings.copilot_token
+                headers={"Authorization": f"Bearer {copilot_token}"}
+                if copilot_token
                 else {},
                 follow_redirects=False,
                 trust_env=False,
@@ -147,7 +152,7 @@ def create_app(
             ) as copilot_client,
         ):
             app.state.copilot = CopilotClient(
-                copilot_client, bool(settings.copilot_token)
+                copilot_client, bool(copilot_token)
             )
             app.state.detection = DetectionClient(client)
             app.state.feed = StatusFeed(app.state.detection, settings.poll_seconds)
@@ -164,9 +169,13 @@ def create_app(
                             service.expire()
 
                 tasks.append(asyncio.create_task(expire_setup_tests()))
+            if orchestration:
+                await orchestration.open()
             try:
                 yield
             finally:
+                if orchestration:
+                    await orchestration.close()
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -277,6 +286,18 @@ def create_app(
             for service in setup_services:
                 service.clear()
             return result
+
+    @app.get("/api/setup/services", dependencies=[Depends(authenticated)])
+    def service_status():
+        if orchestration is None:
+            return {"enabled": False, "phase": "unavailable", "error": "Enable administrator mode and DASHBOARD_ORCHESTRATION_ENABLED on the host to manage services", "services": [], "logs": []}
+        return orchestration.snapshot()
+
+    @app.post("/api/setup/services/start", status_code=202, dependencies=[Depends(authenticated), Depends(exact_origin)])
+    async def start_services(body: StartServices):
+        if orchestration is None:
+            raise AdminError(503, "Service orchestration is not enabled on this host")
+        return await orchestration.start()
 
     def provider_configured():
         if provider_setup is None:
@@ -501,6 +522,45 @@ def create_app(
     def review(incident_id: str, body: Decision):
         require_capability("response_decisions")
         return controller.request(incident_id, body)
+
+    @app.websocket("/ws/setup/services")
+    async def service_logs(websocket: WebSocket):
+        session_id = websocket.cookies.get(COOKIE)
+        if (orchestration is None or websocket.headers.get("origin") != settings.origin
+                or not sessions.valid(session_id)):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+
+        async def updates():
+            sequence, epoch = 0, None
+            while True:
+                if not sessions.valid(session_id):
+                    await websocket.close(code=1008)
+                    return
+                snapshot = orchestration.snapshot(after=sequence, epoch=epoch)
+                await asyncio.wait_for(websocket.send_json(snapshot), timeout=5)
+                sequence, epoch = snapshot["last_sequence"], snapshot["epoch"]
+                async with orchestration.changed:
+                    with anyio.move_on_after(2):
+                        await orchestration.changed.wait()
+                await asyncio.sleep(0.2)
+
+        async def disconnected():
+            while True:
+                if (await websocket.receive())["type"] == "websocket.disconnect":
+                    return
+
+        async with anyio.create_task_group() as tasks:
+            async def run(operation):
+                try:
+                    await operation()
+                except (WebSocketDisconnect, TimeoutError, RuntimeError):
+                    pass
+                finally:
+                    tasks.cancel_scope.cancel()
+            tasks.start_soon(run, updates)
+            tasks.start_soon(run, disconnected)
 
     @app.websocket("/ws")
     @app.websocket("/ws/events")

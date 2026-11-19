@@ -5,7 +5,7 @@ from cryptography.fernet import Fernet
 
 from providers.base import UnavailableProvider
 from providers.claude import ClaudeProvider, from_environment
-from providers.configuration import load_provider_file
+from providers.configuration import load_api_token_file, load_provider_file
 
 KEY = "test-private-anthropic-key"
 CONFIG = {"version": 1, "provider": "claude", "model": "claude-sonnet-5", "api_key": KEY}
@@ -16,13 +16,13 @@ def clear_external_key_path(monkeypatch):
     monkeypatch.delenv("BANTIS_SECRETS_KEY_FILE", raising=False)
 
 
-def write(path, data):
+def write(path, data, purpose="ai-provider"):
     key_path = path.parent / ".secrets.key"
     if not key_path.exists():
         key_path.write_bytes(Fernet.generate_key())
         key_path.chmod(0o600)
     cipher = Fernet(key_path.read_bytes())
-    payload = json.dumps({"purpose": "ai-provider", "data": data}).encode()
+    payload = json.dumps({"purpose": purpose, "data": data}).encode()
     path.write_text(json.dumps({"version": 2, "ciphertext": cipher.encrypt(payload).decode()}))
     path.chmod(0o600)
 
@@ -123,3 +123,37 @@ def test_tampered_ciphertext_is_rejected(tmp_path):
     path.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="unavailable or invalid"):
         load_provider_file(str(path))
+
+def test_managed_api_token_uses_purpose_bound_encrypted_storage(tmp_path):
+    path = tmp_path / "orchestration.json"
+    token = "test-managed-api-token-with-at-least-32-characters"
+    data = {"version": 1, "copilot_api_token": token, "services": ["detection-engine", "copilot-api"]}
+    write(path, data, purpose="orchestration")
+    assert token not in path.read_text()
+    assert load_api_token_file(str(path)) == token
+    with pytest.raises(ValueError):
+        load_provider_file(str(path))
+    write(path, data, purpose="ai-provider")
+    with pytest.raises(ValueError):
+        load_api_token_file(str(path))
+
+
+def test_api_entrypoint_prefers_encrypted_credential_and_never_falls_back_after_failure(tmp_path, monkeypatch):
+    import api
+    import uvicorn
+
+    path = tmp_path / "orchestration.json"
+    token = "test-managed-api-token-with-at-least-32-characters"
+    write(path, {"version": 1, "copilot_api_token": token, "services": []}, purpose="orchestration")
+    monkeypatch.setenv("BANTIS_COPILOT_TOKEN_CONFIG", str(path))
+    monkeypatch.setenv("COPILOT_API_TOKEN", "other-environment-token")
+    monkeypatch.delenv("BANTIS_AI_CONFIG", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    captured = []
+    monkeypatch.setattr(api, "create_app", lambda *args, **kwargs: captured.append(args[2]) or object())
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    assert api.main(["--decision-log", str(tmp_path / "log.db")]) == 0
+    assert captured == [token]
+    path.write_text("corrupted")
+    assert api.main(["--decision-log", str(tmp_path / "log.db")]) == 2
+    assert captured == [token]

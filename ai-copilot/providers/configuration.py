@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 
-def load_provider_file(path: str) -> dict:
+def _encrypted_document(path: str, purpose: str) -> dict:
     try:
         source_path = Path(path)
         if not source_path.is_absolute():
@@ -27,9 +27,16 @@ def load_provider_file(path: str) -> dict:
         cipher = Fernet(_private_read(key_path, 128))
         payload = json.loads(cipher.decrypt(envelope["ciphertext"].encode("ascii")))
         if (not isinstance(payload, dict) or set(payload) != {"purpose", "data"}
-                or payload["purpose"] != "ai-provider" or not isinstance(payload["data"], dict)):
+                or payload["purpose"] != purpose or not isinstance(payload["data"], dict)):
             raise ValueError("Invalid provider document purpose")
-        data = payload["data"]
+        return payload["data"]
+    except (OSError, ValueError, UnicodeError, InvalidToken):
+        raise ValueError("Encrypted configuration is unavailable or invalid") from None
+
+
+def load_provider_file(path: str) -> dict:
+    try:
+        data = _encrypted_document(path, "ai-provider")
         if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
             raise ValueError("Invalid version")
         if data.get("provider") == "none" and set(data) == {"version", "provider"}:
@@ -46,6 +53,20 @@ def load_provider_file(path: str) -> dict:
         return data
     except (OSError, ValueError, UnicodeError, InvalidToken) as exc:
         raise ValueError("Wizard AI provider configuration is unavailable or invalid") from exc
+
+
+def load_api_token_file(path: str) -> str:
+    try:
+        data = _encrypted_document(path, "orchestration")
+        if (set(data) != {"version", "copilot_api_token", "services"}
+                or type(data["version"]) is not int or data["version"] != 1
+                or not isinstance(data["copilot_api_token"], str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", data["copilot_api_token"])
+                or not isinstance(data["services"], list)):
+            raise ValueError("Invalid API token configuration")
+        return data["copilot_api_token"]
+    except ValueError:
+        raise ValueError("Encrypted Copilot API credential is unavailable or invalid") from None
 
 
 def _private_read(path: Path, limit: int):
