@@ -138,7 +138,31 @@
           <button id="telegram-refresh" class="secondary" type="button">Refresh Telegram configuration</button>
           <p class="fine-print">The bot token stays in private server storage and is never returned here. This step saves and tests the connection; automatic incident notifications are not available yet.</p>
           <p><button id="setup-back" class="secondary" type="button">← Back to AI provider</button></p>
-          <p id="telegram-continue" hidden><a href="/">Continue to dashboard →</a></p>
+          <p id="telegram-continue" hidden><button id="services-next" class="secondary" type="button">Next: start services →</button></p>
+        </div>
+      </section>
+      <section id="services-view" hidden aria-labelledby="services-title">
+        <div class="page-heading"><div><p class="eyebrow">SETUP / START SERVICES</p><h1 id="services-title">Bring your services online.</h1><p class="subtitle">Start the configured services together and follow their progress here.</p></div></div>
+        <div class="analysis-panel">
+          <p id="services-phase" role="status">Checking orchestration…</p>
+          <p id="services-error" class="error" role="alert"></p>
+          <p class="fine-print">Starting may build or download images and create local containers. Copilot's worker starts when AI is configured and allowed. The Response Controller keeps its own execution policy. Attack simulations are launched separately.</p>
+          <button id="services-start" class="primary" type="button" disabled>Start all configured services</button>
+          <button id="services-refresh" class="secondary" type="button">Refresh service status</button>
+          <p id="services-observed" class="fine-print"></p>
+          <div class="table-scroll"><table><caption class="sr-only">Configured services and their current states</caption><thead><tr><th scope="col">Service</th><th scope="col">State</th><th scope="col">Health</th><th scope="col">Startup plan</th></tr></thead><tbody id="services-rows"></tbody></table></div>
+          <div class="service-log-heading"><h2>Live service logs</h2><span id="services-connection" role="status">Not connected</span></div>
+          <div class="service-log-controls">
+            <label for="services-source">Show<select id="services-source"><option value="all">All logs</option><option value="startup">Startup progress</option><option value="services">Service output</option></select></label>
+            <button id="services-pause" class="secondary" type="button" aria-pressed="false">Pause display</button>
+            <button id="services-clear" class="secondary" type="button">Clear view</button>
+          </div>
+          <p id="services-log-notice" class="fine-print" role="status">The latest 500 redacted lines are retained in memory. Logs use UTC.</p>
+          <div id="services-logs" class="service-logs" role="log" aria-label="Live service logs" aria-live="off" tabindex="0"></div>
+          <p class="fine-print">Known credentials are redacted, but application logs may contain sensitive operational data. Leaving this screen does not stop startup or running containers.</p>
+          <p><button id="services-back" class="secondary" type="button">← Back to Telegram</button></p>
+          <p id="services-complete" hidden><a href="/">Services ready. Open dashboard →</a></p>
+          <p id="services-manual" hidden><a href="/">Open dashboard with manually managed services →</a></p>
         </div>
       </section>
       <div id="overview-content">

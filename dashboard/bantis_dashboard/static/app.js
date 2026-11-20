@@ -5,6 +5,7 @@ const access = { mode: "loading", setupBusy: false };
 const isSetup = location.pathname === "/setup";
 const providerState = { request: 0, testId: null, busy: false, loaded: false };
 const permissionsState = { request: 0, busy: false, loaded: false, saved: false, responseAvailable: false };
+const servicesState = { request: 0, busy: false, visible: false, socket: null, retry: null, staleTimer: null, delay: 1000, epoch: null, sequence: 0, revision: -1, statusFailed: false, lines: [], snapshot: null, paused: false, gap: false };
 const telegramState = { request: 0, testId: null, busy: false, loaded: false };
 const isAuditLog = location.pathname === "/audit-log";
 const isIncidents = location.pathname === "/incidents";
@@ -65,6 +66,13 @@ function stopSocket() {
   if (state.socket) { state.socket.onclose = null; state.socket.close(); state.socket = null; }
 }
 function signedOut() {
+  stopServiceStream(); servicesState.request++; servicesState.visible = false;
+  servicesState.busy = false; servicesState.epoch = null; servicesState.sequence = 0; servicesState.revision = -1; servicesState.statusFailed = false;
+  servicesState.lines = []; servicesState.snapshot = null; servicesState.paused = false; servicesState.gap = false;
+  $("services-view").hidden = true; $("services-rows").replaceChildren(); $("services-logs").replaceChildren();
+  $("services-error").textContent = ""; $("services-phase").textContent = ""; $("services-observed").textContent = "";
+  $("services-complete").hidden = true; $("services-manual").hidden = true;
+  $("services-pause").textContent = "Pause display"; $("services-pause").setAttribute("aria-pressed", "false");
   permissionsState.request++; permissionsState.busy = false; permissionsState.loaded = false; permissionsState.saved = false;
   $("permissions-notice").textContent = ""; $("permissions-storage").textContent = ""; $("permissions-saved").textContent = "";
   for (const id of ["permission-ai", "permission-telegram", "permission-response"]) $(id).checked = false;
@@ -685,6 +693,130 @@ $("telegram-save").addEventListener("click", async () => {
     if (state.active && request === telegramState.request) $("telegram-notice").textContent = `${error.message} Refresh the saved configuration before retrying.`;
   } finally {
     if (request === telegramState.request) { telegramState.busy = false; telegramControls(); }
+  }
+});
+
+function stopServiceStream() {
+  clearTimeout(servicesState.retry); clearInterval(servicesState.staleTimer);
+  servicesState.retry = null; servicesState.staleTimer = null;
+  if (servicesState.socket) { servicesState.socket.onclose = null; servicesState.socket.close(); servicesState.socket = null; }
+}
+function serviceFreshness() {
+  const saved = servicesState.snapshot;
+  if (!saved) return;
+  const stale = !saved.last_checked || Date.now() - Date.parse(saved.last_checked) > 12000;
+  $("services-observed").textContent = saved.last_checked ? `Last service check: ${time(saved.last_checked)}${stale ? " · stale; refresh or reconnect" : ""}.` : "No service status check has succeeded yet.";
+  $("services-complete").hidden = !saved.ready || stale || servicesState.statusFailed;
+}
+function renderServiceLogs() {
+  if (servicesState.paused) return;
+  const source = $("services-source").value;
+  const lines = servicesState.lines.filter((entry) => source === "all" || entry.source === source);
+  $("services-logs").replaceChildren(...lines.map((entry) => node("div", `${time(entry.at)} [${entry.source}] ${entry.text}`, "service-log-line")));
+  $("services-logs").scrollTop = $("services-logs").scrollHeight;
+  $("services-log-notice").textContent = servicesState.gap ? "Some earlier logs are unavailable after a restart or history overflow. Showing the latest retained lines in UTC." : `${servicesState.lines.length} of at most 500 retained lines · UTC · credentials redacted.`;
+}
+function applyServiceStatus(saved) {
+  if (saved.epoch === servicesState.epoch && saved.revision < servicesState.revision) return;
+  servicesState.revision = saved.revision ?? -1;
+  servicesState.snapshot = saved; servicesState.statusFailed = false;
+  $("services-phase").textContent = saved.enabled ? `Service startup: ${saved.phase}.` : "Service orchestration is unavailable.";
+  $("services-error").textContent = saved.error || "";
+  $("services-start").disabled = servicesState.busy || !saved.enabled || ["starting", "ready", "unavailable"].includes(saved.phase);
+  $("services-manual").hidden = saved.enabled;
+  $("services-rows").replaceChildren(...saved.services.map((service) => {
+    const row = document.createElement("tr");
+    for (const value of [service.name, service.state, service.health || (service.name === "copilot-worker" ? "No health endpoint" : "Not reported"), service.selected ? "Selected" : service.state === "running" ? "Already running; not selected for this launch" : service.note]) row.append(node("td", value));
+    return row;
+  }));
+  if (saved.epoch) {
+    if (servicesState.epoch && servicesState.epoch !== saved.epoch) { servicesState.lines = []; servicesState.sequence = 0; servicesState.gap = true; }
+    servicesState.epoch = saved.epoch;
+    servicesState.gap ||= Boolean(saved.gap) || (servicesState.sequence > 0 && saved.first_sequence > servicesState.sequence + 1);
+    for (const entry of saved.logs) if (entry.sequence > servicesState.sequence) servicesState.lines.push(entry);
+    servicesState.lines = servicesState.lines.slice(-500);
+    servicesState.sequence = saved.last_sequence;
+  }
+  renderServiceLogs(); serviceFreshness();
+}
+function connectServiceStream() {
+  if (!state.active || !servicesState.visible || !servicesState.snapshot?.enabled || servicesState.socket) return;
+  const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/setup/services`);
+  servicesState.socket = socket;
+  $("services-connection").textContent = "Connecting to live logs…";
+  socket.onopen = () => { servicesState.delay = 1000; $("services-connection").textContent = "Live logs connected"; };
+  socket.onmessage = (event) => {
+    if (!state.active || !servicesState.visible || socket !== servicesState.socket) return;
+    try { applyServiceStatus(JSON.parse(event.data)); } catch {
+      servicesState.statusFailed = true; serviceFreshness();
+      $("services-connection").textContent = "Invalid service update; refresh status.";
+    }
+  };
+  socket.onclose = async () => {
+    if (socket !== servicesState.socket || !state.active || !servicesState.visible) return;
+    servicesState.socket = null; servicesState.statusFailed = true; serviceFreshness();
+    $("services-connection").textContent = "Live logs disconnected; reconnecting…";
+    try { await api("/api/session"); } catch {}
+    if (!state.active || !servicesState.visible) return;
+    servicesState.retry = setTimeout(connectServiceStream, servicesState.delay);
+    servicesState.delay = Math.min(servicesState.delay * 2, 15000);
+  };
+  socket.onerror = () => socket.close();
+}
+async function loadServices() {
+  const request = ++servicesState.request;
+  $("services-refresh").disabled = true;
+  try {
+    const saved = await api("/api/setup/services");
+    if (!state.active || !servicesState.visible || request !== servicesState.request) return;
+    applyServiceStatus(saved); connectServiceStream();
+  } catch (error) {
+    if (state.active && servicesState.visible && request === servicesState.request) {
+      servicesState.statusFailed = true;
+      $("services-error").textContent = `${error.message} Last successful status may be stale.`;
+      $("services-complete").hidden = true;
+    }
+  } finally {
+    if (request === servicesState.request) $("services-refresh").disabled = false;
+  }
+}
+$("services-next").addEventListener("click", () => {
+  $("telegram-view").hidden = true; $("services-view").hidden = false;
+  servicesState.visible = true;
+  loadServices();
+  servicesState.staleTimer = setInterval(serviceFreshness, 1000);
+  $("services-title").setAttribute("tabindex", "-1"); $("services-title").focus();
+});
+$("services-back").addEventListener("click", () => {
+  stopServiceStream(); servicesState.visible = false; servicesState.request++;
+  $("services-view").hidden = true; $("telegram-view").hidden = false;
+  $("telegram-title").focus();
+});
+$("services-refresh").addEventListener("click", loadServices);
+$("services-source").addEventListener("change", renderServiceLogs);
+$("services-clear").addEventListener("click", () => { servicesState.lines = []; $("services-logs").replaceChildren(); });
+$("services-pause").addEventListener("click", () => {
+  servicesState.paused = !servicesState.paused;
+  $("services-pause").textContent = servicesState.paused ? "Resume display" : "Pause display";
+  $("services-pause").setAttribute("aria-pressed", String(servicesState.paused));
+  if (!servicesState.paused) renderServiceLogs();
+});
+$("services-start").addEventListener("click", async () => {
+  if (servicesState.busy || !servicesState.visible) return;
+  servicesState.busy = true; $("services-start").disabled = true;
+  const request = ++servicesState.request;
+  try {
+    const saved = await api("/api/setup/services/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (!state.active || !servicesState.visible || request !== servicesState.request) return;
+    applyServiceStatus(saved); connectServiceStream();
+  } catch (error) {
+    if (state.active && servicesState.visible && request === servicesState.request) $("services-error").textContent = error.message;
+  } finally {
+    servicesState.busy = false;
+    if (state.active && servicesState.visible && servicesState.snapshot) {
+      const saved = servicesState.snapshot;
+      $("services-start").disabled = !saved.enabled || ["starting", "ready", "unavailable"].includes(saved.phase);
+    }
   }
 });
 

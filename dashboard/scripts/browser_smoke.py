@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
+    copilot_token = "browser-fixture-copilot-token"
     available = True
     live_events: ClassVar[list] = []
     analysis_state = "analyzed"
@@ -42,7 +43,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if url.path.endswith(("/analysis", "/questions")):
             if (
                 self.headers.get("Authorization")
-                != "Bearer browser-fixture-copilot-token"
+                != "Bearer " + self.copilot_token
             ):
                 self.send_error(401)
                 return
@@ -157,7 +158,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.headers.get("Authorization") != "Bearer browser-fixture-copilot-token":
+        if self.headers.get("Authorization") != "Bearer " + self.copilot_token:
             self.send_error(401)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -585,6 +586,7 @@ def check_admin_setup(page, origin, token, screenshots):
     check_permissions_setup(page, screenshots)
     check_provider_setup(page, origin)
     check_telegram_setup(page)
+    check_service_startup(page, args_screenshots=screenshots)
     page.goto(origin)
 
 
@@ -710,6 +712,74 @@ def check_telegram_setup(page):
     page.set_viewport_size({"width": 1440, "height": 1100})
 
 
+
+def check_service_startup(page, *, args_screenshots):
+    # The Telegram check ends by signing in again at Permissions.
+    page.locator("#permissions-next").click()
+    page.locator("#setup-next").click()
+    expect(page.locator("#telegram-continue")).to_be_visible()
+    page.locator("#services-next").click()
+    expect(page.locator("#services-view")).to_be_visible()
+    expect(page.locator("#services-start")).to_be_enabled()
+    page.locator("#services-start").click()
+    expect(page.locator("#services-phase")).to_contain_text("failed")
+    expect(page.locator("#services-error")).to_contain_text("Service startup failed")
+    page.locator("#services-start").click()
+    expect(page.locator("#services-phase")).to_contain_text("ready")
+    expect(page.locator("#services-complete")).to_be_visible()
+    expect(page.locator("#services-logs")).to_contain_text("service fixture log")
+    expect(page.locator("#services-logs")).to_contain_text("[REDACTED]")
+    assert FixtureHandler.copilot_token not in page.locator("#services-logs").inner_text()
+    assert page.locator("#services-logs img").count() == 0
+    assert page.evaluate("window.untrustedExecuted") is None
+    page.locator("#services-pause").click()
+    frozen = page.locator("#services-logs").inner_text()
+    page.wait_for_timeout(600)
+    assert page.locator("#services-logs").inner_text() == frozen
+    page.locator("#services-pause").click()
+    page.locator("#services-source").select_option("startup")
+    expect(page.locator("#services-logs")).to_contain_text("Startup is complete")
+    page.locator("#services-source").select_option("all")
+    # A transient session-status request failure must still reconnect the stream.
+    page.route("**/api/session", lambda route: route.abort())
+    page.evaluate("servicesState.socket.close()")
+    expect(page.locator("#services-connection")).to_contain_text("disconnected")
+    expect(page.locator("#services-connection")).to_contain_text("Live logs connected")
+    page.unroute("**/api/session")
+    expect(page.locator("#services-complete")).to_be_visible()
+    # Late REST responses must not replace a newer streamed snapshot.
+    old = page.request.get(page.evaluate("location.origin") + "/api/setup/services").json()
+    old.update(revision=-1, phase="idle", ready=False)
+    page.route("**/api/setup/services", lambda route: route.fulfill(json=old))
+    page.locator("#services-refresh").click()
+    expect(page.locator("#services-refresh")).to_be_enabled()
+    expect(page.locator("#services-phase")).to_contain_text("ready")
+    page.unroute("**/api/setup/services")
+    if args_screenshots:
+        page.screenshot(path=str(args_screenshots / "service-startup-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if args_screenshots:
+        page.screenshot(path=str(args_screenshots / "service-startup-mobile.png"), full_page=True)
+    page.locator("#services-back").click()
+    expect(page.locator("#telegram-view")).to_be_visible()
+    page.locator("#services-next").click()
+    expect(page.locator("#services-phase")).to_contain_text("ready")
+    page.locator("#services-clear").click()
+    page.locator("#services-pause").click()
+    page.locator("#services-clear").click()
+    expect(page.locator("#services-logs")).to_be_empty()
+    page.locator("#services-pause").click()
+    page.locator("#sign-out").click()
+    expect(page.locator("#services-view")).to_be_hidden()
+    expect(page.locator("#services-logs")).to_be_empty()
+    page.locator("#admin-username").fill("browser.admin")
+    page.locator("#admin-password").fill("browser administrator passphrase")
+    page.get_by_role("button", name="Open dashboard").click()
+    expect(page.locator("#workspace")).to_be_visible()
+    page.set_viewport_size({"width": 1440, "height": 1100})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -746,6 +816,8 @@ def main():
             "DASHBOARD_TOKEN": token,
             "DASHBOARD_STATE_DIR": admin_dir if args.admin_setup else "",
             "BANTIS_SECRETS_KEY_FILE": "",
+            "DASHBOARD_ORCHESTRATION_ENABLED": "true" if args.admin_setup else "false",
+            "DASHBOARD_ORCHESTRATION_RANGE": "false",
             "DASHBOARD_ORIGIN": origin,
             "DETECTION_ENGINE_URL": f"http://127.0.0.1:{upstream.server_port}",
             "DASHBOARD_POLL_SECONDS": "1",
@@ -759,10 +831,13 @@ def main():
             # Inject fixture transports only in this disposable test factory.
             # Production uses the fixed HTTPS Anthropic and Telegram endpoints.
             fixture = Path(provider_fixture_dir) / "provider_browser_fixture.py"
-            fixture.write_text('''import json
+            fixture.write_text('''import asyncio
+import json
+from pathlib import Path
 import httpx
 from bantis_dashboard.main import create_app as dashboard_app
 from bantis_dashboard.telegram_setup import TEST_MESSAGE
+from bantis_dashboard.secret_store import SecretStore
 
 def handle(request):
     if request.headers.get("x-api-key") != "browser-fixture-provider-key":
@@ -775,8 +850,38 @@ def telegram(request):
     chat_id = int(json.loads(request.content)["chat_id"])
     return httpx.Response(200, json={"ok": True, "result": {"message_id": 1, "chat": {"id": chat_id}, "text": TEST_MESSAGE}})
 
+class ComposeFixture:
+    def __init__(self):
+        self.attempts = 0
+        self.services = []
+
+    async def run(self, argv, *, env, cwd, line=None, timeout=30, capture=False):
+        if "context" in argv:
+            return 0, "unix:///var/run/docker.sock"
+        if "info" in argv or "config" in argv:
+            return 0, ""
+        if "ps" in argv:
+            return 0, json.dumps([{"Service": name, "State": "running", "Health": "healthy"} for name in self.services])
+        if "logs" in argv:
+            counter = 0
+            while True:
+                if line:
+                    await line(f"2026-11-24T10:00:{counter:02d}Z service fixture log <img src=x onerror=window.untrustedExecuted=true>")
+                    await line("Authorization: Bearer " + SecretStore(Path(env["BANTIS_ORCHESTRATION_STATE"])).read("orchestration")[0]["copilot_api_token"])
+                counter += 1
+                await asyncio.sleep(0.3)
+        if "up" in argv:
+            self.attempts += 1
+            if line:
+                await line("Building fixture services")
+            if self.attempts == 1:
+                return 1, ""
+            self.services = argv[argv.index("--wait-timeout") + 2:]
+            return 0, ""
+        raise RuntimeError("Unexpected fixture command")
+
 def create_app():
-    return dashboard_app(provider_transport=httpx.MockTransport(handle), telegram_transport=httpx.MockTransport(telegram))
+    return dashboard_app(provider_transport=httpx.MockTransport(handle), telegram_transport=httpx.MockTransport(telegram), orchestration_runner=ComposeFixture())
 ''')
             environment["PYTHONPATH"] = provider_fixture_dir + os.pathsep + str(ROOT / "dashboard")
             factory = "provider_browser_fixture:create_app"
@@ -813,6 +918,14 @@ def create_app():
                             "Disposable dashboard did not start"
                         ) from None
                     time.sleep(0.1)
+            if args.admin_setup:
+                # Playwright may use a separate interpreter without app dependencies.
+                credential = subprocess.run(
+                    [args.python, "-c", "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from bantis_dashboard.secret_store import SecretStore; print(SecretStore(Path(sys.argv[2])).read('orchestration')[0]['copilot_api_token'])",
+                     str(ROOT / "dashboard"), admin_dir],
+                    text=True, capture_output=True, check=True,
+                )
+                FixtureHandler.copilot_token = credential.stdout.strip()
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 page = browser.new_page(viewport={"width": 1440, "height": 1100})
@@ -912,7 +1025,7 @@ def create_app():
                 assert not errors, errors
                 browser.close()
                 print(
-                    f"PASS: {'administrator wizard, permissions, encrypted storage, AI provider, optional Telegram, and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
+                    f"PASS: {'administrator wizard, permissions, encrypted storage, AI provider, optional Telegram, orchestration, live service logs, and sign-in, ' if args.admin_setup else ''}dashboard, Response review (Approve/Modify/Dismiss), Audit log, Incidents analysis and follow-ups, and Live feed, arrivals, filters, pause/resume, clear, bounded history, gaps, stale data, reconnect, desktop/mobile, text rendering, and logout"
                 )
         finally:
             process.terminate()
