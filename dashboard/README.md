@@ -10,8 +10,9 @@ This is the initial implementation of the
 [design baseline](../docs/wizard-dashboard-design.md). Final visual approval
 still requires the agreed diagrams. The wizard supports administrator creation
 dashboard capability permissions, encrypted local secret storage, and optional
-AI provider and Telegram steps with real connection tests. Other service
-configuration steps, emergency stop, and resume remain open.
+AI provider and Telegram steps with real connection tests. The service startup
+step orchestrates Docker Compose and streams live operational logs. Browser
+service-address configuration, emergency stop, and resume remain open.
 Audit log provides read-only access to the local controller event journal.
 The Incidents page includes recorded Copilot analysis and follow-up questions.
 Optional response review connects incident proposals to the local controller's
@@ -57,9 +58,12 @@ reports the source as unavailable. No demo incidents are generated.
 | `DASHBOARD_ORIGIN` | `http://127.0.0.1:8200` | Exact browser origin, without a path, query, or credentials. Used for host and browser origin checks. |
 | `DETECTION_ENGINE_URL` | `http://127.0.0.1:8000` | Server-side upstream address; never supplied by browser requests. |
 | `COPILOT_API_URL` | `http://127.0.0.1:8100` | Server-side Copilot API address. |
-| `COPILOT_API_TOKEN` | Optional | Copilot service bearer token (at least 16 ASCII characters, no whitespace); kept server-side. Without it, the panel reports unconfigured. |
+| `COPILOT_API_TOKEN` | Optional | Copilot service bearer token (at least 16 ASCII characters, no whitespace); kept server-side. Without it, the panel reports unconfigured in manual mode. Managed orchestration supplies an encrypted service token automatically. |
 | `DASHBOARD_AUDIT_PATH` | Optional | Server-configured path to the controller `reviews.sqlite3`; absent means unconfigured. The dashboard only reads it. |
 | `DASHBOARD_RESPONSE_ENABLED` | `false` | Enable host-local controller review using the dashboard process's controller environment and OS identity. |
+| `DASHBOARD_ORCHESTRATION_ENABLED` | `false` | Allow administrator-authorized startup of the fixed local Compose stack; requires administrator mode and host Docker access. |
+| `DASHBOARD_ORCHESTRATION_RANGE` | `true` | Include Range API, PostgreSQL, Redis, and Nginx. Set false to manage platform services only. |
+| `DASHBOARD_RANGE_PORT` | `8080` | Loopback port for the managed Range Nginx service. |
 | `DASHBOARD_POLL_SECONDS` | `5` | Shared status and event polling interval, from 1 to 300 seconds. |
 
 Keep this foundation bound to loopback. The Detection Engine still has
@@ -263,8 +267,9 @@ does not reconfigure an already running process. The file takes precedence over
 `ANTHROPIC_API_KEY`. Explicit **No AI provider**, missing files, and invalid or
 publicly readable files make AI unavailable without falling back to another key.
 When `BANTIS_AI_CONFIG` is unset, existing environment-based configuration still
-works. Copilot API connectivity and its separate `COPILOT_API_TOKEN` must still
-be configured as described below. This step does not start services or mark the
+works. Manual deployments still configure Copilot API connectivity and the
+separate `COPILOT_API_TOKEN`; managed orchestration supplies the service
+credential automatically. This step does not start services or mark the
 entire wizard complete.
 
 ## Optional Telegram setup
@@ -307,10 +312,169 @@ Receipts clear on save, logout, session rotation, restart, and expiry cleanup.
 Saved selections survive restart; unreadable, malformed, or public files report
 unavailable rather than silently disabling Telegram.
 
-After saving either selection, choose **Continue to dashboard**. This implements
+After saving either selection, choose **Next: start services**. This implements
 connection setup and its test message only; automatic incident notification
 delivery remains future work. Saving does not mark the entire wizard complete,
 change controller permissions, or enable response actions.
+
+## Service orchestration and live logs
+
+The final implemented setup step starts the configured services through the
+repository's root [Compose definition](../compose.yaml). The dashboard runs on
+the host as the coordinator. Containers never receive the Docker socket.
+
+| Service | Startup behavior |
+|---|---|
+| Detection Engine | Required; starts first with persistent SQLite data and an HTTP health check. |
+| Copilot API | Required for recorded analysis/history; starts with encrypted provider settings and a managed API credential. Works with an explicit No AI choice. |
+| Copilot worker | Starts when dashboard AI requests are allowed and a Claude key is saved. Otherwise clearly marked unselected. A running worker has no separate health endpoint. |
+| Range API, PostgreSQL, Redis, Nginx | Included by default. Dependencies wait for health checks. Set `DASHBOARD_ORCHESTRATION_RANGE=false` for platform services only. |
+| Response Controller | Remains the existing host-local bridge/CLI, governed by its separate permissions and policy. No executable response actions are enabled by startup. |
+| Attack simulations | Run separately through the existing CLI; starting services does not launch attacks. |
+
+### Run the complete setup flow
+
+Use a Linux host with an accessible local Docker daemon and Docker Compose v2
+supporting `up --wait`. The dashboard OS account must already have Docker access.
+This is a privileged host capability: enable it only for the trusted local
+administrator. The host flag is off by default; administrator sign-in and an
+exact dashboard Origin are required to start services.
+
+For Range, prepare the existing host configuration once. Copy
+`range/.env.example` to `range/.env` only if the file does not already exist.
+Replace the database, Redis, and JWT placeholders; keep connection URLs in sync
+with their passwords. Set mode `0600` on the file. These remain existing Range
+environment settings and are not imported into the wizard secret store.
+To omit Range, set `DASHBOARD_ORCHESTRATION_RANGE=false` instead.
+
+From the repository root:
+
+```bash
+python3 -m venv dashboard/.venv
+dashboard/.venv/bin/python -m pip install -r dashboard/requirements.txt
+export DASHBOARD_STATE_DIR="$HOME/.local/state/bantis-dashboard"
+export DASHBOARD_ORIGIN=http://127.0.0.1:8200
+export DASHBOARD_ORCHESTRATION_ENABLED=true
+printf 'Dashboard bootstrap token (32–512 bytes): '
+read -r -s DASHBOARD_TOKEN
+printf '\n'
+export DASHBOARD_TOKEN
+cd dashboard
+.venv/bin/python -m uvicorn bantis_dashboard.main:create_app --factory --host 127.0.0.1 --port 8200 --workers 1
+```
+
+Open **http://127.0.0.1:8200/setup**, create the administrator if necessary, and
+sign in. Save **Permissions**, select and save an **AI provider** or **No AI
+provider**, then configure or **Skip Telegram**. Choose **Next: start services**
+and **Start all configured services**. No separate manual service launch is
+needed. Image builds/downloads may take several minutes on first use.
+
+The page shows selected services, current container/health states, startup
+progress, and live service output. A successful start requires all selected
+HTTP/database/cache services to report healthy and the optional worker to be
+running. Compose's [dependency ordering](https://docs.docker.com/compose/how-tos/startup-order/)
+and [`up --wait`](https://docs.docker.com/reference/cli/docker/compose/up/) drive
+startup; container existence alone cannot mark this step ready. Health checks
+establish service availability, not authentication completeness or deployment
+security. The dashboard link appears only after a fresh successful status check.
+
+The host endpoints default to Detection Engine **127.0.0.1:8000**, Copilot API
+**127.0.0.1:8100**, and Range **127.0.0.1:8080**. Database and Redis ports remain
+internal. `DETECTION_ENGINE_URL` and `COPILOT_API_URL` may select other local HTTP
+ports; managed URLs must use `localhost` or `127.0.0.1` without a path.
+`DASHBOARD_RANGE_PORT` changes the managed Range port. These managed port choices
+take precedence over the standalone Range's `NGINX_PORT`. Resolve conflicts
+with manually started services before retrying; orchestration never stops
+unrelated containers or host processes.
+
+### State, credentials, and retries
+
+The private state directory contains persistent `detection-data/` and
+`copilot-data/` directories. Range PostgreSQL uses a Compose project volume.
+The project name derives from the absolute state directory and appears in the
+status response. Keep that path stable across restarts; using a different path
+creates a separate project and Range volume. This does not adopt or overwrite
+the standalone `bantis-range` deployment.
+
+The dashboard generates a separate Copilot API token and saves it only in the
+encrypted `orchestration.json` document. In managed mode this credential replaces
+the manually supplied `COPILOT_API_TOKEN` for the managed API connection.
+Copilot reads it through `BANTIS_COPILOT_TOKEN_CONFIG`, decrypting the mounted
+file at startup. The token is absent from command arguments, Docker environment
+metadata, logs, and browser responses. Invalid encrypted credential files stop
+API startup without falling back to another token.
+
+Copilot receives read-only mounts of the private dashboard state and key
+directory under the same trusted OS identity. With an external encryption key,
+use a dedicated private key directory containing only this deployment's key.
+Keep the original key and state available at their configured paths. Container
+access to these mounts belongs to the same trusted service boundary as the
+host-local Copilot configuration.
+
+Duplicate starts share the active task, and an already ready stack is not
+started again. A private process lock allows one coordinator per state directory;
+run one dashboard worker. Startup failures and timeouts retain containers and
+data for diagnosis. Correct the issue, refresh status, and retry explicitly.
+There is no automatic retry of a failed startup and no browser volume-reset or
+stack-deletion operation. Failed status refreshes preserve the last known data
+with stale/error notices. A dashboard restart discovers existing containers
+without rerunning startup. Closing the dashboard stops its CLI watchers, not
+the managed containers; container restart policies remain in effect.
+
+Saving new provider credentials does not restart an already running Copilot.
+After changing credentials, restart the managed Copilot services from the host
+using the displayed project name, then refresh the startup screen. Dashboard
+permissions control dashboard requests; revoking AI access does not terminate
+an already running worker or cancel an in-flight remote request. Controller
+execution settings and stop state remain independently governed.
+
+### Live log behavior
+
+Logs stream through session-protected `/ws/setup/services` with exact Origin
+checks and periodic session revalidation. Logout clears the browser view and
+revokes the stream. WebSocket reconnects and status refreshes do not launch
+services again. The page supports startup/service filters, pause/resume, and
+clearing the local view. Log content renders as text, including HTML-like data.
+
+The dashboard keeps at most 500 redacted lines in memory, with bounded line
+lengths; it omits oversized lines and reports history gaps after overflow or
+restart. The browser suppresses duplicate/stale updates, reconnects after
+interruptions, and marks old service checks stale. Known configured credentials,
+URL credentials, common token/password fields, and private key blocks are
+redacted before entering the retained buffer. This is not an audit log or a
+guarantee that every application value is non-sensitive. Raw Docker logs remain
+on the host, with size/count rotation configured by Compose. Keep operational
+log access limited to the trusted administrator.
+
+### Verify orchestration
+
+From the repository root:
+
+```bash
+range/.venv/bin/python -m pytest dashboard/tests -q
+python3 dashboard/scripts/browser_smoke.py --admin-setup
+node --check dashboard/bantis_dashboard/static/app.js
+git diff --check
+```
+
+The automated API/browser tests simulate Docker and external providers. They
+cover fixed command arguments, authentication/Origin, duplicate starts,
+failures/retries, restart recovery, locking, readiness, redaction, bounded
+history, streaming, navigation, mobile layout, and logout. Compose configuration
+is validated without starting Docker resources when its CLI is installed.
+
+For a real build/startup/health check using disposable state and free loopback
+ports, with no AI calls or use of existing Range credentials:
+
+```bash
+range/.venv/bin/python dashboard/scripts/orchestration_smoke.py
+```
+
+This optional test copies only runtime sources into a temporary build context,
+uses a unique project/image namespace, verifies HTTP health, authenticated
+Copilot access and Detection Engine ingestion, then removes only its test
+containers and PostgreSQL volume. Built image layers remain cached. It requires
+Docker access, image/dependency downloads on first use, and enough disk space.
 
 ## API and live updates
 
@@ -322,6 +486,9 @@ change controller permissions, or enable response actions.
 | `GET /api/setup` | Public | Reports whether administrator mode is enabled and an account exists; returns no account details. |
 | `POST /api/setup/admin` | Bootstrap token + exact Origin | Creates the single administrator once; returns 409 after account creation. Does not issue a session. |
 | `POST /api/admin/session` | Administrator credentials + exact Origin | Creates the existing opaque session cookie in administrator mode. |
+| `GET /api/setup/services` | Session | Redacted orchestration state, selected service health, and bounded recent logs. Host-disabled mode reports unavailable. |
+| `POST /api/setup/services/start` | Administrator session + exact Origin + host opt-in | Starts the fixed service plan asynchronously; duplicate starts share existing work. Requires saved setup choices. |
+| `WS /ws/setup/services` | Administrator session + exact Origin + host opt-in | Live redacted startup/service logs and periodic status; revoked on logout or expiry. |
 | `GET /api/setup/permissions` | Administrator session | Saved capability choices and encrypted storage readiness. |
 | `POST /api/setup/permissions` | Administrator session + exact Origin | Saves encrypted capability choices; clears previous integration test receipts. |
 | `GET /api/setup/provider` | Administrator session | Redacted saved provider selection. Requires administrator mode. |

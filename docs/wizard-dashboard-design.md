@@ -14,7 +14,9 @@ persistence consumed by Copilot on startup. The optional Telegram step supports 
 real test message, session-bound test-before-save, private persistence, and explicit
 skipping without credentials. The Permissions step controls dashboard AI requests,
 Telegram tests, and manual response decisions with explicit opt-in. Wizard secrets
-now use authenticated local encryption, including legacy-file migration. Other wizard steps remain open. All interface copy and
+now use authenticated local encryption, including legacy-file migration. A service
+startup step now orchestrates the fixed Compose stack and streams bounded,
+redacted live logs. Host service configuration and final setup review remain open. All interface copy and
 documentation must be in English.
 
 ## Design references and freeze criteria
@@ -64,7 +66,8 @@ flowchart TD
     P --> C[Service connections]
     C --> D[Optional Copilot configuration]
     D --> T[Optional Telegram connection]
-    T --> E[Review configuration and checks]
+    T --> S[Start configured services and follow live logs]
+    S --> E[Review configuration and checks]
     E --> F{Required checks pass?}
     F -->|No| C
     F -->|Yes| G[Open dashboard]
@@ -78,6 +81,7 @@ flowchart TD
 | Service connections | Validate addresses and connectivity; distinguish reachable, unavailable, and unconfigured services. Connectivity alone does not prove authentication or deployment readiness. |
 | Copilot configuration | Implemented for Claude or no AI: administrator-authorized connection test, session-bound test receipt, private save, and redacted retrieval. Tests send only a fixed minimal prompt and may incur charges. Copilot loads saved settings on startup; operational service connectivity remains separate. |
 | Telegram configuration | Implemented in administrator mode: configure a bot token and chat, send one real test message, then save tested credentials with a session-bound receipt; or explicitly skip without credentials or a network request. Automatic incident notifications remain future work. |
+| Service startup and live logs | Implemented with host opt-in and administrator authorization: fixed Compose commands, dependency health checks, startup failure/retry, persistent data, restart reconciliation, and redacted bounded WebSocket logs. Range is included by default; the AI worker follows saved configuration. Response actions and attack simulations remain separate. |
 | Configuration review | Show connection results, Copilot availability, and response defaults without exposing credentials. Clearly identify blocking errors and optional omissions. |
 | Completion | Open the dashboard only after required setup checks succeed; show an explicit unavailable state for optional services. |
 
@@ -149,7 +153,8 @@ resume and approval invalidation remain unimplemented.
 | AI provider selection | Dashboard `GET`/`POST /api/setup/provider` and `POST /api/setup/provider/test`; Copilot `BANTIS_AI_CONFIG` | Implemented for Claude or no AI, real server-side testing, receipts bound to tested credentials and session, private atomic persistence, and startup consumption by worker and API. |
 | Permissions and encrypted storage | Dashboard `GET`/`POST /api/setup/permissions`; private local Fernet key | Implemented with default-off optional capabilities, request enforcement, receipt invalidation, authenticated encrypted persistence, and legacy migration; separate controller policy remains authoritative. |
 | Optional Telegram | Dashboard `GET`/`POST /api/setup/telegram` and `POST /api/setup/telegram/test` | Implemented with one real test message, session-bound receipts, private atomic persistence, redacted retrieval, and explicit skip; automatic incident delivery remains open. |
-| Remaining setup steps | Host environment configuration | Service configuration, checks, configuration persistence, and wizard completion remain open. |
+| Service startup and live logs | Dashboard `GET /api/setup/services`, `POST /api/setup/services/start`, and `/ws/setup/services`; root Compose stack | Implemented with fixed local startup, health checks, authenticated logs, idempotency, persistence, and failure/retry. HTTP health is availability, not deployment security. |
+| Remaining setup steps | Host environment configuration | Browser service-address configuration, final review, and complete wizard sign-off remain open. |
 | Audit history | Session-protected dashboard `GET /api/audit-log` reads a configured local controller journal in read-only mode | Implemented with full-chain local verification, selected fields, exact filters, and pagination; independent anchoring remains open. |
 | Response review | Session-protected dashboard proposals/review routes and authenticated host-local controller bridge | Implemented for Approve/Modify/Dismiss with exact hashes, operator secret, host identity, and fresh approval after modification. |
 | Response stop and rollback | Local controller CLI and journal | Browser stop, resume, and rollback remain unimplemented; preserve [controller guarantees](response-controller-security.md). |

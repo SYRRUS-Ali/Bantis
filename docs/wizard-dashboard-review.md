@@ -1,7 +1,7 @@
 # Wizard and Dashboard Design Review
 
 Review against the [design baseline](wizard-dashboard-design.md). This checklist
-is acceptance guidance for the full UI. The administrator, Permissions, AI provider, and optional Telegram steps and existing
+is acceptance guidance for the full UI. The administrator, Permissions, AI provider, optional Telegram, and service startup steps and existing
 dashboard have executable tests; the remaining wizard steps are future work.
 
 ## Reference review before design freeze
@@ -42,6 +42,15 @@ invalidating receipts after edits, expiry, logout, or session rotation; preservi
 the chat ID on Back; redacting tokens in retrieval and HTTPX logs; private atomic
 storage; and persistence of both enabled and skipped selections after restart.
 Automatic incident notification delivery is outside this step.
+
+Service startup acceptance also requires: a host opt-in and administrator session;
+exact Origin and fixed request fields; validated saved setup choices; dependency
+health checks; no duplicate launches; actionable failure and explicit retry;
+reconciliation after dashboard restart; one coordinator per state directory;
+redacted bounded live logs; history-gap/stale notices; safe text rendering;
+stream revocation on logout; and a fresh successful status before showing the
+startup completion link. Service startup must not grant response authorization,
+launch attack simulations, reset volumes, or stop unrelated services.
 
 ## Dashboard acceptance scenarios
 
@@ -101,3 +110,13 @@ Copilot configuration tests. The browser variant begins at **Setup → Permissio
 and verifies defaults, save/reload, navigation, readiness status, and mobile layout.
 See [run and inspect instructions](../dashboard/README.md#run-and-inspect-this-step)
 for a local walkthrough.
+
+Orchestration coverage is in
+[test_orchestration.py](../dashboard/tests/test_orchestration.py),
+[test_services_api.py](../dashboard/tests/test_services_api.py), and
+[test_compose_definition.py](../dashboard/tests/test_compose_definition.py).
+The browser check includes failure/retry, live text logs, filtering, pause/resume,
+clear view, navigation, and mobile layout. The optional
+[Docker smoke test](../dashboard/scripts/orchestration_smoke.py) builds an isolated
+stack, checks real service health and ingestion with AI disabled, and removes
+only its disposable resources. See the [launch guide](../dashboard/README.md#service-orchestration-and-live-logs).

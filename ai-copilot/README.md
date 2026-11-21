@@ -83,6 +83,15 @@ back to another key. See [Permissions and encrypted storage](../dashboard/README
 for migration and recovery. The Permissions step controls dashboard requests;
 the separately running Copilot worker retains its host configuration.
 
+With [wizard orchestration](../dashboard/README.md#service-orchestration-and-live-logs),
+Compose starts the API automatically and starts the worker when AI is configured
+and allowed. Both share the persistent decision log and read-only encrypted
+configuration. The managed API token is supplied through
+`BANTIS_COPILOT_TOKEN_CONFIG`, an absolute path to the encrypted `orchestration.json`
+file. This takes precedence over `COPILOT_API_TOKEN` and fails closed when
+unavailable or invalid. Managed tokens never enter Docker environment metadata.
+Manual deployments retain the existing `COPILOT_API_TOKEN` behavior.
+
 Without `BANTIS_AI_CONFIG`, the existing environment-based setup remains
 unchanged. Wizard connection tests send a fixed minimal prompt, incur provider
 usage, and do not use or populate incident records, decision logs, or the

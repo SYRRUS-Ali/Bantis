@@ -19,6 +19,20 @@ Bantis v1 focuses on **supply chain attacks** against a CI/CD pipeline and its d
 - Docker Compose primary, Helm advanced, no Terraform ([ADR 0002](docs/adr/0002-no-terraform-compose-primary.md))
 - Human-in-the-loop by default; AI recommends, operator approves ([ADR 0004](docs/adr/0004-recommend-only-default.md))
 
+## Start services through the setup wizard
+
+The dashboard now includes a service orchestration step with live logs. It uses
+the root [Compose stack](compose.yaml) to start Detection Engine, Copilot API,
+optional Copilot worker, and the Range services with dependency health checks.
+Start the dashboard host coordinator with `DASHBOARD_STATE_DIR` and
+`DASHBOARD_ORCHESTRATION_ENABLED=true`, then open
+**http://127.0.0.1:8200/setup**. Complete Permissions, provider selection, and
+optional Telegram, then choose **Next: start services → Start all configured
+services**. The [complete launch guide](dashboard/README.md#service-orchestration-and-live-logs)
+covers Docker prerequisites, private Range configuration, ports, encrypted
+credentials, and live log controls. This starts service availability checks;
+controller response authorization remains separate.
+
 ## M1: Range v1
 
 ✅ Complete — the target environment and its CI/CD pipeline are up and
@@ -59,9 +73,9 @@ client → nginx (:8080) → api (:8000) → db (:5432)
 ```
 
 Nginx is the only service exposed to the host; `api`, `db`, and `redis`
-are only reachable on the internal Compose network. All four run under a
-single `range` Compose profile, kept opt-in for a future root-level
-orchestrator (M3+). Full component table and data flow:
+are only reachable on the internal Compose network. The `range` Compose profile
+remains available for standalone runs. The root orchestration stack uses a
+separate project namespace and defaults to a loopback Range port of 8080. Full component table and data flow:
 [`docs/range-architecture.md`](docs/range-architecture.md).
 
 ### Known issues
