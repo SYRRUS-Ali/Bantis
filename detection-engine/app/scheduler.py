@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.correlation import run_correlation
+from app.critical_alerts import deliver_pending_critical_alerts
 from app.db import SessionLocal
 from app.incident_models import IncidentORM
 
@@ -36,6 +37,7 @@ class CorrelationScheduler:
     def run_once(self) -> list[IncidentORM]:
         with self._session_factory() as session:
             incidents = run_correlation(session, now=datetime.now(timezone.utc))
+            deliver_pending_critical_alerts(session)
         for incident in incidents:
             logger.info("incident %s formed: %s (%s)", incident.incident_id, incident.pattern, incident.severity)
         return incidents

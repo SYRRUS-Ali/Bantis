@@ -53,10 +53,22 @@ services:
     init: true
     environment:
       DATABASE_URL: sqlite:////data/events.db
+      BANTIS_ORCHESTRATION_STATE: /run/bantis
+      BANTIS_SECRETS_KEY_FILE: "/run/bantis-key/${BANTIS_ORCHESTRATION_KEY_NAME:-.secrets.key}"
     volumes:
       - type: bind
         source: "${BANTIS_ORCHESTRATION_STATE:-/nonexistent}/detection-data"
         target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BANTIS_ORCHESTRATION_STATE:-/nonexistent}"
+        target: /run/bantis
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BANTIS_ORCHESTRATION_KEY_DIR:-/nonexistent}"
+        target: /run/bantis-key
+        read_only: true
         bind: {create_host_path: false}
     ports: ["127.0.0.1:${BANTIS_DETECTION_PORT:-8000}:8000"]
     healthcheck:

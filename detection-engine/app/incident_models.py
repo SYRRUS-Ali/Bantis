@@ -27,3 +27,14 @@ class IncidentEventClaimORM(Base):
 
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     incident_id: Mapped[str] = mapped_column(String, index=True)
+
+class CriticalAlertORM(Base):
+    """Transactional outbox entry for one critical incident notification."""
+
+    __tablename__ = "critical_alerts"
+
+    incident_id: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -33,3 +33,9 @@ def test_compose_dependency_graph_and_host_boundaries():
         assert services[name]["user"] == "1000:1000"
         assert "COPILOT_API_TOKEN" not in services[name]["environment"]
         assert services[name]["environment"]["BANTIS_COPILOT_TOKEN_CONFIG"] == "/run/bantis/orchestration.json"
+    detection = services["detection-engine"]
+    detection_mounts = {volume["target"]: volume for volume in detection["volumes"]}
+    assert detection_mounts["/run/bantis"]["read_only"] is True
+    assert detection_mounts["/run/bantis-key"]["read_only"] is True
+    assert detection["environment"]["BANTIS_ORCHESTRATION_STATE"] == "/run/bantis"
+    assert detection["environment"]["BANTIS_SECRETS_KEY_FILE"].startswith("/run/bantis-key/")

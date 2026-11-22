@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.event_models import EventORM
-from app.incident_models import IncidentEventClaimORM, IncidentORM
+from app.incident_models import CriticalAlertORM, IncidentEventClaimORM, IncidentORM
 
 SAME_SOURCE_WINDOW_SECONDS = 60
 COMPOSITE_WINDOW_SECONDS = 300
@@ -257,6 +257,8 @@ def _correlate_unclaimed(session: Session, now: datetime | None = None) -> list[
     new_incidents = correlate(events, now)
     for incident in new_incidents:
         session.add(incident)
+        if incident.severity == "critical":
+            session.add(CriticalAlertORM(incident_id=incident.incident_id, created_at=incident.created_at))
         for event_id in incident.correlated_event_ids:
             session.add(IncidentEventClaimORM(event_id=event_id, incident_id=incident.incident_id))
     session.commit()
