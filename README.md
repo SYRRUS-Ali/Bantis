@@ -32,6 +32,9 @@ services**. The [complete launch guide](dashboard/README.md#service-orchestratio
 covers Docker prerequisites, private Range configuration, ports, encrypted
 credentials, and live log controls. This starts service availability checks;
 controller response authorization remains separate.
+When **Allow Telegram messages** is enabled and Telegram is configured, the
+Detection Engine also sends real alerts for critical incidents and retries
+failed deliveries from its persistent outbox.
 
 ## M1: Range v1
 

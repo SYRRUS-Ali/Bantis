@@ -411,6 +411,14 @@ Keep the original key and state available at their configured paths. Container
 access to these mounts belongs to the same trusted service boundary as the
 host-local Copilot configuration.
 
+The Detection Engine also receives those state and key mounts read-only so it
+can decrypt the saved Telegram and permissions documents in memory. It sends
+plain-text Telegram alerts only for `critical` incidents and only while
+**Allow Telegram messages** is enabled. The critical-alert outbox is committed
+with each incident; Telegram delivery failures remain queued and are retried
+on later correlation passes. High-severity incidents are still available in
+the dashboard and incident API but do not generate Telegram messages.
+
 Duplicate starts share the active task, and an already ready stack is not
 started again. A private process lock allows one coordinator per state directory;
 run one dashboard worker. Startup failures and timeouts retain containers and

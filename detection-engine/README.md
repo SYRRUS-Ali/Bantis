@@ -21,6 +21,8 @@ detection-engine/
 │   ├── incident_models.py    # IncidentORM table definition
 │   ├── correlation.py         # correlate() + run_correlation() — docs/correlation-design.md's three patterns
 │   ├── scheduler.py            # CorrelationScheduler — runs correlation every CORRELATION_INTERVAL_SECONDS
+│   ├── critical_alerts.py      # encrypted Telegram config reader + durable critical-alert outbox
+│   ├── telegram_notifier.py    # Telegram Bot API sender, adapted from monitor-alert-tool
 │   ├── scorecard.py            # generate_scorecard() — detection rate, false positives, MTTD
 │   ├── models.py               # Pydantic schemas for the API (EventIn/EventOut, IncidentOut/IncidentListOut)
 │   └── routers/
@@ -88,6 +90,24 @@ in a background thread of the API process, so incidents form without
 anyone calling `run_correlation()`. A failed pass is logged and the next
 one runs anyway. Several processes can run passes at once: the
 `incident_event_claims` key (below) keeps that safe.
+
+**Critical incidents can send real Telegram alerts.** A `critical` incident
+creates a `critical_alerts` outbox row in the same database transaction as the
+incident. The scheduler sends a plain-text message through
+`app/telegram_notifier.py` (adapted from `monitor-alert-tool/src/telegram_notifier.py`)
+and marks the row delivered only after Telegram returns `ok: true`. A failed
+or uncertain send stays queued and is retried on the next correlation pass.
+Only critical incidents are sent; current high-severity patterns remain in the
+incident API and dashboard without Telegram alerts.
+
+In the managed Compose stack, the Detection Engine reads the existing encrypted
+`telegram.json` and `permissions.json` plus their private Fernet key from
+read-only mounts. The `telegram_messages` permission must be enabled and a
+Telegram bot/chat must have been tested and saved in Setup. Turning off the
+permission stops sends immediately while keeping queued alerts for a later
+re-enable. Credentials are decrypted in memory and are not passed in the
+container environment or written into logs. Standalone deployments without
+these Bantis state/key mounts leave alerts queued and continue correlation.
 
 A scheduled pass runs while events are still arriving, so it can't treat
 what it sees as complete the way a one-off batch run can. Run naively, it
