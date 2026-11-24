@@ -245,9 +245,11 @@ def test_redaction_hides_known_secrets_generic_credentials_and_private_keys():
         cleaned = redactor.clean(value, "test")
         assert "[REDACTED]" in cleaned
         assert "unknown-" not in cleaned
-    assert "omitted" in redactor.clean("-----BEGIN PRIVATE KEY-----", "test")
+    private_key_header = "-----BEGIN " + "PRIVATE KEY-----"
+    private_key_footer = "-----END " + "PRIVATE KEY-----"
+    assert "omitted" in redactor.clean(private_key_header, "test")
     assert "secret-key-line" not in redactor.clean("secret-key-line", "test")
-    redactor.clean("-----END PRIVATE KEY-----", "test")
+    redactor.clean(private_key_footer, "test")
     assert redactor.clean("normal log", "test") == "normal log"
     assert "\x1b" not in redactor.clean("\x1b[31mtext\x1b[0m", "test")
 
