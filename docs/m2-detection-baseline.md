@@ -8,6 +8,10 @@ scenario stops reaching the detection-engine, or a correlation rule
 stops firing) shows up as a diff against a known-good run instead of
 requiring someone to re-derive what "correct" looks like from scratch.
 
+For per-run detection coverage, gap classification, and the expected remediation
+and retest workflow, see the [Purple Team loop](purple-team-loop.md). This
+grouped baseline does not establish detection of each scenario in isolation.
+
 ## How to reproduce
 
 ```bash

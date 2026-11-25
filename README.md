@@ -126,3 +126,7 @@ dashboard/.venv/bin/python dashboard/scripts/orchestration_smoke.py
 ```
 
 For installation and component-specific run commands, use the linked READMEs. Design references and security decisions are collected under [`docs/`](docs/).
+
+Use the [Purple Team loop](docs/purple-team-loop.md) to review an M2 scenario
+that produces no M3 incident, record the detection gap, assign remediation,
+and verify the original conditions before closure.
