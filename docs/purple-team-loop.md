@@ -7,6 +7,12 @@ comparison of saved producer history with persisted incidents, including
 deadlines and late detections. Triage, ticket creation, remediation, and
 response authorization remain operator responsibilities.
 
+The [scenario-to-rule suggester](../gap-detector/README.md#scenario-to-rule-suggester)
+adds an inactive correlation draft for each scenario with an outstanding gap.
+Treat it as a proposal for the repair step: verify telemetry and scheduler
+health first, review rule ordering and noise, then implement and replay.
+Generating a draft does not close the gap or enable a detection rule.
+
 Use the [scenario reference](scenarios.md), [event schema](event-schema.md),
 [correlation design](correlation-design.md), and current
 [Detection Engine guide](../detection-engine/README.md) together. The

@@ -13,7 +13,7 @@ Bantis is designed for one trusted operator and one local environment. It is not
 | [Range](range/README.md) | FastAPI, PostgreSQL, Redis, and Nginx application stack with structured event logging. |
 | [Attack Simulator](attack-sim/README.md) | Four supply-chain scenarios: malicious dependency, leaked secret, compromised CI step, and typosquatting. |
 | [Detection Engine](detection-engine/README.md) | Event ingestion, three correlation patterns, incident API, scorecard, and optional Telegram alerts for critical incidents. |
-| [Gap Detector](gap-detector/README.md) | Compares saved attack-sim history with persisted incidents and reports pending runs, detection gaps, and late detections. |
+| [Gap Detector](gap-detector/README.md) | Compares saved attack-sim history with persisted incidents, reports detection gaps, and suggests inactive scenario-based correlation drafts. |
 | [AI Copilot](ai-copilot/README.md) | Optional Claude-based incident analysis and follow-up answers. Recommendations do not execute actions. |
 | [Dashboard](dashboard/README.md) | Setup wizard, service orchestration, live logs, incidents, evidence, live feed, audit history, and optional response review. |
 | [Response Controller](response-controller/README.md) | Host-local policy, approval, execution, stop, rollback, and audit controls, separate from Copilot. |

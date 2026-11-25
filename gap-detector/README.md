@@ -5,6 +5,8 @@ It reads the producer-side attack-sim log and every page of the Detection
 Engine incidents API, then writes a JSON report identifying valid M2 runs
 without a referencing incident. It requires Python 3.10+ and the standard
 library only. It does not run attacks, create incidents, or execute responses.
+Outstanding gaps also produce inactive correlation-rule drafts through the
+[scenario-to-rule suggester](#scenario-to-rule-suggester).
 
 ## Capture the attack history
 
@@ -112,6 +114,83 @@ limitations, assign an owner, and verify a repair. Isolated M2 scenarios lack
 dedicated rules today and can correctly appear as gaps while current rule
 tests pass. No automatic ticket creation, notifications, or containment is added.
 
+## Scenario-to-rule suggester
+
+Every successful comparison now includes `rule_suggestions`, generated locally
+from the canonical [event schema](../docs/event-schema.md#attack_scenario_run).
+No provider, network call, or additional dependency is needed for drafting.
+The existing incident queries still run as part of the gap check.
+
+Only outstanding `gap` entries produce drafts. `pending`, `invalid`, and
+`detected` runs produce none. `late_detection` remains a timing finding, rather
+than prompting a redundant coverage rule. Multiple gaps for the same scenario
+produce one draft containing sorted gap IDs, event IDs, and observed outcomes.
+The draft ID is stable across replays; the report continues to represent the
+current exercise rather than accumulated review history.
+
+To generate a separate draft file from an existing complete report, run from
+`gap-detector/`:
+
+```bash
+python -m gap_detector.suggester --report /tmp/bantis-purple/gaps.json --output /tmp/bantis-purple/rule-drafts.json
+```
+
+The offline command accepts a complete version 1 gap report, including reports
+created before automatic drafting was added. It validates timestamps, counts,
+scenario names, gap IDs, and gap evidence. Unsupported, incomplete, or
+contradictory evidence leaves the previous output intact. Exit `0` means a
+successful generation, including an empty draft list; exit `2` means invalid
+input, configuration, or a write failure. Input and output must be different
+files. The service's existing gap exit codes are unchanged.
+
+Each suggestion contains:
+
+- A stable `draft_id`, `status: draft`, and `enabled: false`.
+- Schema fields and a selector for `source=attack-sim`,
+  `event_type=attack_scenario_run`, the scenario name, and status in
+  `success` or `failure`. `error` outcomes never match.
+- A proposed single-event correlation: one event, grouped by `event_id`, with
+  `window_seconds=0`. A fresh run can match without an unrelated burst partner.
+- An incident blueprint with a scenario-specific pattern, the contributing
+  event ID, technique field, summary, and proposed severity for each outcome.
+  `confidence` is unset until a reviewer chooses and evaluates scoring.
+- References to the observed gaps, a rationale, integration review steps, and
+  complete positive and negative event examples with expected match results.
+
+For example, an isolated `compromised-ci-step` gap proposes this selector:
+
+```json
+{
+  "source": "attack-sim",
+  "event_type": "attack_scenario_run",
+  "details.scenario": "compromised-ci-step",
+  "details.status": ["success", "failure"]
+}
+```
+
+Selector keys use event-schema paths; array values mean membership. The
+`matches_draft(draft, event)` function previews that fixed selector format and
+checks for an event ID and a timezone-aware event timestamp. It does not execute
+rule text or create incidents. Drafts use documented common fields rather than
+requiring optional artifacts, scanner return codes, tool output, exact event
+IDs, or a second scenario. Technique IDs are taken from the scenario contract.
+Raw log messages, credentials, and tool output are omitted from the drafts.
+
+These JSON objects are review blueprints, not a configuration format loaded by
+the Detection Engine. `$event...` values describe field bindings for a future
+implementation. Drafts remain inactive, and the current correlation rules and
+incident storage are untouched. They cover instrumented lab scenario results;
+they do not establish detection of equivalent activity outside attack-sim.
+
+Before implementing a draft, confirm ingestion and scheduling worked. A missing
+forwarded event or failed correlation pass needs a pipeline repair rather than
+a new rule. Review noise from legitimate lab replays and preserve current
+grouped coverage. In particular, a dependency or secret fallback must respect
+the 300-second composite partner hold and composite priority before claiming
+its event. Decide ordering relative to `same-source-burst`, reuse event-claim
+deduplication, calibrate scoring, and test both isolated and grouped cases.
+Close the gap only after the original conditions pass with fresh event IDs.
+
 ## Validation
 
 Install pytest and the Detection Engine dependencies in your test environment.
@@ -131,6 +210,13 @@ ingests events over HTTP, and invokes the real gap-detector CLI. It verifies
 both a stored isolated miss and an event lost before ingestion, and preserves
 the report when the API stops. It needs loopback listeners; it runs no attack
 scenarios, creates no commits, and uses no external services.
+
+Suggester checks cover all four scenario schemas, successful and defended
+outcomes, grouping and stable IDs, rejected or excluded evidence, selector
+previews, and offline generation. The integration test verifies that the live
+gap-detector CLI embeds drafts, offline regeneration produces identical output,
+example envelopes validate against the Detection Engine schema, and drafting
+does not change stored incidents.
 
 The existing `security-e2e` CI job runs this suite, and changes under
 `gap-detector/` trigger that workflow for pushes and pull requests.
