@@ -2,8 +2,10 @@
 
 This process turns an M2 attack-sim run that produces no M3 Detection Engine
 incident into a tracked improvement and a repeatable verification. It defines
-an operator workflow; it does not add automatic gap detection, ticket creation,
-notifications, or response execution.
+an operator workflow. The [Gap Detector](../gap-detector/README.md) automates
+comparison of saved producer history with persisted incidents, including
+deadlines and late detections. Triage, ticket creation, remediation, and
+response authorization remain operator responsibilities.
 
 Use the [scenario reference](scenarios.md), [event schema](event-schema.md),
 [correlation design](correlation-design.md), and current

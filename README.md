@@ -13,6 +13,7 @@ Bantis is designed for one trusted operator and one local environment. It is not
 | [Range](range/README.md) | FastAPI, PostgreSQL, Redis, and Nginx application stack with structured event logging. |
 | [Attack Simulator](attack-sim/README.md) | Four supply-chain scenarios: malicious dependency, leaked secret, compromised CI step, and typosquatting. |
 | [Detection Engine](detection-engine/README.md) | Event ingestion, three correlation patterns, incident API, scorecard, and optional Telegram alerts for critical incidents. |
+| [Gap Detector](gap-detector/README.md) | Compares saved attack-sim history with persisted incidents and reports pending runs, detection gaps, and late detections. |
 | [AI Copilot](ai-copilot/README.md) | Optional Claude-based incident analysis and follow-up answers. Recommendations do not execute actions. |
 | [Dashboard](dashboard/README.md) | Setup wizard, service orchestration, live logs, incidents, evidence, live feed, audit history, and optional response review. |
 | [Response Controller](response-controller/README.md) | Host-local policy, approval, execution, stop, rollback, and audit controls, separate from Copilot. |
@@ -113,6 +114,7 @@ Install the dependencies for the component you are checking, then follow its tes
 
 - [Dashboard tests and browser flow](dashboard/README.md#verify)
 - [Detection Engine tests](detection-engine/README.md#running-the-tests)
+- [Gap Detector tests](gap-detector/README.md#validation)
 - [Attack Simulator tests](attack-sim/README.md#running-the-tests)
 - [Copilot tests](ai-copilot/README.md#running-the-tests)
 - [Response Controller tests](response-controller/README.md#running-the-tests)
