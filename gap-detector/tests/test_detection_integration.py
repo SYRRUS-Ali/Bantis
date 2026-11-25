@@ -71,9 +71,15 @@ def test_saved_producer_log_compared_with_real_scheduled_incidents(tmp_path):
             history.write_text("\n".join(lines) + "\nsuccess: scenario finished\n")
             client = IncidentClient(url, page_size=1)
             deadline = time.monotonic() + 5
-            while not client.incidents():
+            while True:
+                try:
+                    if client.incidents():
+                        break
+                except ValueError:
+                    pass  # scheduler insertion can invalidate a scan; retry as the service does
                 assert time.monotonic() < deadline, "scheduler did not form the composite incident"
                 time.sleep(0.02)
+            before_drafting = client.incidents()
             output = tmp_path / "gaps.json"
             command = [sys.executable, "-m", "gap_detector", "--history", str(history),
                        "--detection-url", url, "--output", str(output)]
@@ -84,6 +90,27 @@ def test_saved_producer_log_compared_with_real_scheduled_incidents(tmp_path):
             runs = {item["event_id"]: item for item in report["runs"]}
             assert runs["dependency"]["incident_ids"] == runs["secret"]["incident_ids"]
             assert runs["lost"]["state"] == runs["isolated"]["state"] == "gap"
+            drafts = report["rule_suggestions"]["drafts"]
+            assert {draft["scenario"] for draft in drafts} == {"typosquatting", "compromised-ci-step"}
+            assert all(draft["enabled"] is False for draft in drafts)
+            assert {event_id for draft in drafts for event_id in draft["evidence"]["event_ids"]} == {"lost", "isolated"}
+            offline = tmp_path / "drafts.json"
+            result = subprocess.run(
+                [sys.executable, "-m", "gap_detector.suggester", "--report", str(output), "--output", str(offline)],
+                cwd=ROOT / "gap-detector", capture_output=True, text=True, timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert json.loads(offline.read_text()) == report["rule_suggestions"]
+            assert client.incidents() == before_drafting
+            cases = [case["event"] for draft in drafts for case in draft["validation_cases"]]
+            validation = subprocess.run(
+                [sys.executable, "-c",
+                 "import json, sys; from app.models import EventIn; "
+                 "[EventIn.model_validate(event) for event in json.load(sys.stdin)]"],
+                cwd=ROOT / "detection-engine", input=json.dumps(cases),
+                capture_output=True, text=True, timeout=10,
+            )
+            assert validation.returncode == 0, validation.stderr
             previous = output.read_bytes()
             server.terminate()
             server.wait(timeout=5)

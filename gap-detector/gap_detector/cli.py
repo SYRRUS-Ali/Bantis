@@ -14,6 +14,7 @@ from urllib.error import URLError
 
 from .client import IncidentClient
 from .core import compare, read_history, utc
+from .suggester import suggest_rules
 
 
 def seconds(value: str) -> float:
@@ -74,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
                                     "detection_url": args.detection_url,
                                     "wait_seconds": None if args.deadline else args.wait_seconds,
                                     "deadline": args.deadline.isoformat() if args.deadline else None}
+                stage = "suggestions"
+                report["rule_suggestions"] = suggest_rules(report)
                 stage = "report"
                 write_report(args.output, report)
                 print(json.dumps({"status": "ok", "observed_at": report["observed_at"],
