@@ -7,6 +7,7 @@ on:
       - 'range/**'
       - 'attack-sim/**'
       - 'detection-engine/**'
+      - 'gap-detector/**'
       - 'ai-copilot/**'
       - 'response-controller/**'
       - 'dashboard/**'
@@ -20,6 +21,7 @@ on:
       - 'range/**'
       - 'attack-sim/**'
       - 'detection-engine/**'
+      - 'gap-detector/**'
       - 'ai-copilot/**'
       - 'response-controller/**'
       - 'dashboard/**'
@@ -313,6 +315,10 @@ jobs:
 
       - name: Test Detection Engine API and correlation
         working-directory: detection-engine
+        run: python -m pytest tests -v
+
+      - name: Test gap detection against producer history and incidents
+        working-directory: gap-detector
         run: python -m pytest tests -v
 
       - name: Test attack, detection, analysis, response, and audit
