@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-
 from gap_detector import cli
 from gap_detector.core import SCENARIOS, compare, read_history
 from gap_detector.suggester import TECHNIQUES, main, matches_draft, suggest_rules
@@ -34,7 +33,7 @@ def test_schema_based_draft_for_every_m2_scenario(tmp_path, scenario):
     report = report_for(tmp_path, event(scenario))
     draft, = suggest_rules(report)["drafts"]
     assert draft["enabled"] is False
-    assert draft["status"] == "draft"
+    assert draft["status"] == "pending_review"
     assert draft["selector"] == {"source": "attack-sim", "event_type": "attack_scenario_run",
                                  "details.scenario": scenario, "details.status": ["success", "failure"]}
     assert draft["correlation"] == {"kind": "single-event", "group_by": ["event_id"],
@@ -172,3 +171,8 @@ def test_service_embeds_drafts_and_keeps_gap_exit_code(tmp_path, monkeypatch):
         assert cli.main(["--history", str(tmp_path / "history.log"), "--output", str(output)]) == 1
     report = json.loads(output.read_text())
     assert report["rule_suggestions"] == suggest_rules(report)
+    from gap_detector.review_queue import ReviewQueue, queue_path
+
+    proposal, = ReviewQueue(queue_path(output)).list()
+    assert proposal["status"] == "pending_review"
+    assert proposal["draft"] == report["rule_suggestions"]["drafts"][0]

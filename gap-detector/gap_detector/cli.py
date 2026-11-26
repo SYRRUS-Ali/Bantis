@@ -5,6 +5,7 @@ import http.client
 import json
 import math
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -14,6 +15,7 @@ from urllib.error import URLError
 
 from .client import IncidentClient
 from .core import compare, read_history, utc
+from .review_queue import ReviewQueue, queue_path
 from .suggester import suggest_rules
 
 
@@ -47,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--history", required=True, type=Path, help="Saved attack-sim stdout log")
     parser.add_argument("--detection-url", default="http://127.0.0.1:8000")
     parser.add_argument("--output", required=True, type=Path, help="Atomic JSON report path")
+    parser.add_argument("--review-queue", type=Path, help="Persistent SQLite review queue (default: beside output)")
     timing = parser.add_mutually_exclusive_group()
     timing.add_argument("--wait-seconds", type=seconds, default=330,
                         help="Per-run emission-to-deadline allowance (default: 330)")
@@ -55,8 +58,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Polling interval; 0 checks once (default)")
     parser.add_argument("--timeout", type=seconds, default=5)
     args = parser.parse_args(argv)
-    if args.history.resolve() == args.output.resolve():
-        parser.error("history and output must be different files")
+    queue = queue_path(args.output, args.review_queue)
+    if len({args.history.resolve(), args.output.resolve(), queue.resolve()}) != 3:
+        parser.error("history, output, and review queue must be different files")
     try:
         client = IncidentClient(args.detection_url, timeout=args.timeout)
     except ValueError as exc:
@@ -77,13 +81,15 @@ def main(argv: list[str] | None = None) -> int:
                                     "deadline": args.deadline.isoformat() if args.deadline else None}
                 stage = "suggestions"
                 report["rule_suggestions"] = suggest_rules(report)
+                stage = "review_queue"
+                ReviewQueue(queue).enqueue(report["rule_suggestions"])
                 stage = "report"
                 write_report(args.output, report)
                 print(json.dumps({"status": "ok", "observed_at": report["observed_at"],
                                   "counts": report["counts"]}), flush=True)
                 if args.interval == 0:
                     return 1 if report["counts"]["gap"] or report["counts"]["late_detection"] else 0
-            except (OSError, ValueError, URLError, http.client.HTTPException, OverflowError) as exc:
+            except (OSError, ValueError, URLError, http.client.HTTPException, OverflowError, sqlite3.Error) as exc:
                 # Never echo raw event or response content (it may contain secrets).
                 print(json.dumps({"status": "error", "stage": stage, "error_type": type(exc).__name__,
                                   "message": "Check incomplete; previous report retained."}),

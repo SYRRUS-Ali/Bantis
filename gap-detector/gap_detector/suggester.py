@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
@@ -97,7 +98,7 @@ def _draft(scenario: str, runs: list[dict]) -> dict:
     ):
         cases.append({"name": name, "matches": False, "event": {**example, **changes}})
     return {
-        "draft_id": rule_id, "status": "draft", "enabled": False,
+        "draft_id": rule_id, "status": "pending_review", "enabled": False,
         "title": f"Single-event coverage for {scenario}",
         "scenario": scenario, "mitre_technique": TECHNIQUES[scenario],
         "schema_reference": "docs/event-schema.md#attack_scenario_run",
@@ -155,18 +156,22 @@ def suggest_rules(report: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     # Imported lazily: the service imports suggest_rules from this module.
     from .cli import write_report
+    from .review_queue import ReviewQueue, queue_path
 
     parser = argparse.ArgumentParser(description="Generate inactive correlation drafts from a gap report.")
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--review-queue", type=Path, help="Persistent SQLite review queue (default: beside output)")
     args = parser.parse_args(argv)
-    if args.report.resolve() == args.output.resolve():
-        parser.error("report and output must be different files")
+    queue = queue_path(args.output, args.review_queue)
+    if len({args.report.resolve(), args.output.resolve(), queue.resolve()}) != 3:
+        parser.error("report, output, and review queue must be different files")
     try:
         with args.report.open(encoding="utf-8") as stream:
             suggestions = suggest_rules(json.load(stream))
+        ReviewQueue(queue).enqueue(suggestions)
         write_report(args.output, suggestions)
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
         print(json.dumps({"status": "error", "error_type": type(exc).__name__,
                           "message": "Draft generation failed; previous output retained."}), file=sys.stderr)
         return 2

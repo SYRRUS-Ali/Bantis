@@ -14,6 +14,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from gap_detector.client import IncidentClient
+from gap_detector.review_queue import ReviewQueue, queue_path
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -101,6 +102,14 @@ def test_saved_producer_log_compared_with_real_scheduled_incidents(tmp_path):
             )
             assert result.returncode == 0, result.stderr
             assert json.loads(offline.read_text()) == report["rule_suggestions"]
+            queue = ReviewQueue(queue_path(output))
+            pending = queue.list()
+            assert len(pending) == len(drafts)
+            assert all(item["status"] == "pending_review" for item in pending)
+            for item in pending:
+                decision = queue.decide(item["proposal_id"], "approved", reviewer="integration-reviewer",
+                                        reason="Verify approval alone does not change detection")
+                assert decision["draft"]["enabled"] is False
             assert client.incidents() == before_drafting
             cases = [case["event"] for draft in drafts for case in draft["validation_cases"]]
             validation = subprocess.run(
