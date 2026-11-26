@@ -42,8 +42,9 @@ python -m gap_detector --history /tmp/bantis-purple/attack.log --output /tmp/ban
 Add `--interval 10` to keep checking in the foreground, suitable for a local
 process supervisor. Ctrl+C stops it. `--detection-url` defaults to
 `http://127.0.0.1:8000`; `--timeout` sets the positive HTTP timeout in seconds
-(default 5). No additional listener or database is needed. Keep the history
-and output paths distinct and use a single writer per report file.
+(default 5). No additional listener or database service is needed. A local
+SQLite review queue is created beside the report (see below). Keep the history,
+output, and queue paths distinct and use a single writer per report file.
 
 The default deadline for each run is its producer timestamp plus 330 seconds:
 5 seconds ingestion allowance + 300 seconds settling + two default 10-second
@@ -145,7 +146,7 @@ files. The service's existing gap exit codes are unchanged.
 
 Each suggestion contains:
 
-- A stable `draft_id`, `status: draft`, and `enabled: false`.
+- A stable `draft_id`, `status: pending_review`, and `enabled: false`.
 - Schema fields and a selector for `source=attack-sim`,
   `event_type=attack_scenario_run`, the scenario name, and status in
   `success` or `failure`. `error` outcomes never match.
@@ -191,6 +192,60 @@ its event. Decide ordering relative to `same-source-burst`, reuse event-claim
 deduplication, calibrate scoring, and test both isolated and grouped cases.
 Close the gap only after the original conditions pass with fresh event IDs.
 
+## Human review queue
+
+Both the comparison service and the offline suggester enqueue every proposal
+before publishing their JSON output. New proposals stop at `pending_review`
+(pending review), with `enabled: false`, following M4's human-in-the-loop
+principle. The default queue path is the full output filename followed by
+`.review.sqlite3`, for example `/tmp/bantis-purple/gaps.json.review.sqlite3`.
+Pass `--review-queue /tmp/bantis-purple/review.sqlite3` to either generator to
+share a queue across output files. New queue files use owner-only permissions.
+
+From `gap-detector/`, inspect the pending queue and a specific proposal:
+
+```bash
+python -m gap_detector.review_queue --queue /tmp/bantis-purple/gaps.json.review.sqlite3 list
+python -m gap_detector.review_queue --queue /tmp/bantis-purple/gaps.json.review.sqlite3 show <proposal_id>
+```
+
+Use the full `proposal_id` printed by `list` or `show`. It is a SHA-256 hash of
+the exact draft, including its evidence, selector, and integration checklist.
+Review the complete draft, examples, and original gap evidence before deciding:
+
+```bash
+python -m gap_detector.review_queue --queue /tmp/bantis-purple/gaps.json.review.sqlite3 approve <proposal_id> --reviewer ali --reason "Reviewed positive and benign replay cases; integration still required"
+python -m gap_detector.review_queue --queue /tmp/bantis-purple/gaps.json.review.sqlite3 reject <another_proposal_id> --reviewer ali --reason "Missing telemetry needs repair before adding coverage"
+python -m gap_detector.review_queue --queue /tmp/bantis-purple/gaps.json.review.sqlite3 list --status all
+```
+
+Only `pending_review → approved` and `pending_review → rejected` are allowed.
+Reviewer, reason, and UTC decision time are persisted with the original draft.
+Blank identities/reasons, unknown IDs, and repeat decisions fail; concurrent
+decisions allow one winner. Exit codes are `0` for success and `2` for failure.
+The CLI relies on local filesystem access; reviewer names are operator-supplied,
+not authenticated identities, and this SQLite history is not tamper-evident.
+
+Repeated polling or regeneration of an identical draft preserves its decision
+and creates no duplicate. Changed draft content, including changed gap evidence,
+gets a new proposal ID and starts pending again; approval never transfers to a
+changed rule. Old proposals remain visible even if a later report has no gaps.
+Use `list --status approved` or `--status rejected` to filter decisions.
+
+Generated reports always describe fresh recommendations as `pending_review`;
+the queue's outer `status` is the authoritative review decision, while its
+nested `draft` preserves the original proposal snapshot. **Approval does not
+enable, install, or execute a rule.** Even an approved proposal retains
+`enabled: false`. Detection Engine integration, scoring, regression tests,
+and deployment remain separate reviewed work. Neither generation nor review
+changes correlation rules, creates incidents, or invokes the Response Controller.
+
+A failed queue write prevents publishing a new report and retains the previous
+output. Queue insertion and report replacement are separate commits: a failed
+report write may leave a pending proposal in the queue. A retry is safe and
+idempotent; it does not activate anything. Existing pre-queue reports can be
+imported by rerunning the offline suggester against their complete gap report.
+
 ## Validation
 
 Install pytest and the Detection Engine dependencies in your test environment.
@@ -217,6 +272,12 @@ previews, and offline generation. The integration test verifies that the live
 gap-detector CLI embeds drafts, offline regeneration produces identical output,
 example envelopes validate against the Detection Engine schema, and drafting
 does not change stored incidents.
+
+Queue checks cover restart persistence, deduplication, content-bound decisions,
+changed proposals requiring fresh review, concurrent decisions, required reviewer
+and reason, inactive proposals, CLI operations, and retaining reports on queue
+failure. The live integration check also approves queued proposals and verifies
+that incident storage remains unchanged.
 
 The existing `security-e2e` CI job runs this suite, and changes under
 `gap-detector/` trigger that workflow for pushes and pull requests.
