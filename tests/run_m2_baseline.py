@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -7,12 +9,14 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "detection-engine"))
 sys.path.insert(0, str(_REPO_ROOT / "attack-sim"))
+sys.path.insert(0, str(_REPO_ROOT / "gap-detector"))
 
 _PORT = 18767
 _DETECTION_ENGINE_URL = f"http://127.0.0.1:{_PORT}"
@@ -106,7 +110,27 @@ def _run_all_scenarios(tmp_dir: Path) -> dict:
     return results
 
 
-def main() -> int:
+def _run_gap_detector(history: Path, output: Path, deadline: datetime) -> int:
+    """Check producer evidence after batch correlation, before API shutdown."""
+    from gap_detector.cli import main as gap_detector_main
+
+    return gap_detector_main([
+        "--history", str(history), "--output", str(output),
+        "--detection-url", _DETECTION_ENGINE_URL,
+        "--deadline", deadline.isoformat(),
+    ])
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the full M2 baseline and post-run gap check.")
+    parser.add_argument("--output-dir", type=Path, help="Parent directory for retained per-run evidence")
+    args = parser.parse_args(argv)
+    if args.output_dir is not None:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = Path(tempfile.mkdtemp(prefix="bantis-m2-evidence-", dir=args.output_dir))
+    history = evidence_dir / "attack.log"
+    gap_report = evidence_dir / "gaps.json"
+    print(f"M2 evidence directory: {evidence_dir}")
     tmp_dir = Path(tempfile.mkdtemp(prefix="bantis-m2-baseline-"))
     failures: list[str] = []
 
@@ -115,18 +139,25 @@ def main() -> int:
 
     server = thread = engine = None
     real_subprocess_run = None
+    history_handler = None
     try:
         print("Starting a live detection-engine...")
         server, thread, engine = _start_detection_engine(tmp_dir)
 
         real_subprocess_run = _mock_external_tools()
 
-        from logging_config import configure_logging
+        from logging_config import JSONFormatter, configure_logging
 
         configure_logging()
+        history_handler = logging.FileHandler(history, encoding="utf-8")
+        history_handler.setFormatter(JSONFormatter())
+        logging.getLogger().addHandler(history_handler)
 
         print(f"\nRunning {len(_SCENARIO_IDS)} M2 scenarios in sequence:")
-        _run_all_scenarios(tmp_dir)
+        results = _run_all_scenarios(tmp_dir)
+        for scenario_id, result in results.items():
+            if result.status.value == "error":
+                failures.append(f"scenario execution error: {scenario_id}")
 
         from sqlalchemy.orm import Session
 
@@ -163,7 +194,21 @@ def main() -> int:
                     f"{scorecard.false_positive_count} unexpected incident(s): {scorecard.unexpected_patterns}"
                 )
 
+        # The fixed deadline closes this batch after its committed correlation
+        # pass. Keep producer evidence even when forwarding failed.
+        deadline = datetime.now(timezone.utc)
+        history_handler.flush()
+        print("\nRunning post-run gap detector...")
+        gap_status = _run_gap_detector(history, gap_report, deadline)
+        if gap_status == 1:
+            failures.append(f"post-run gap detector found gaps or late detections; see {gap_report}")
+        elif gap_status != 0:
+            failures.append(f"post-run gap detector check incomplete (exit {gap_status}); see {history}")
+
     finally:
+        if history_handler is not None:
+            logging.getLogger().removeHandler(history_handler)
+            history_handler.close()
         if real_subprocess_run is not None:
             subprocess.run = real_subprocess_run
         if server is not None:
@@ -180,7 +225,7 @@ def main() -> int:
 
     print(
         "M2 BASELINE PASSED: all four scenarios reached the detection-engine "
-        "and both existing correlation rules fired as documented."
+        "and both existing correlation rules fired as documented; post-run gap check passed."
     )
     return 0
 
