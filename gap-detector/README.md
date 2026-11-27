@@ -32,6 +32,13 @@ feed for the producer history, so a lost forwarded event can still be flagged.
 
 ## Run once or as a service
 
+The full [M2 baseline runner](../docs/m2-detection-baseline.md#automatic-post-run-gap-check)
+automatically runs a one-shot comparison after its batch correlation pass,
+using that pass's completion time as a fixed deadline. It captures producer
+history and retains the report and review queue in a unique evidence directory.
+Gaps or incomplete comparisons fail the baseline. Individual scenario CLI
+replays continue to use the manual capture and comparison commands below.
+
 With the Detection Engine running, from the repository root:
 
 ```bash

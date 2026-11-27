@@ -101,3 +101,10 @@ against a live detection-engine and exits non-zero if either existing
 correlation rule doesn't fire as documented. See
 [`docs/m2-detection-baseline.md`](../docs/m2-detection-baseline.md) for
 the recorded baseline result and how to reproduce it.
+
+Completed batches automatically run the gap detector before API shutdown.
+Producer history, the gap report, and the review queue remain in a unique,
+printed evidence directory; `--output-dir` chooses its parent. Gaps and
+incomplete checks also fail the baseline. `test_m2_post_run.py` checks this
+flow with controlled scenario results and the real Detection Engine and gap
+detector, without running attacks or creating Git commits.

@@ -25,6 +25,39 @@ the script fakes out only those two tools; every other call (`git`,
 `pip`) is the real thing running against scratch temp directories, same
 approach as `tests/test_e2e_composite_incident.py`.
 
+## Automatic post-run gap check
+
+Every completed four-scenario baseline now invokes the gap detector once,
+after batch correlation commits and before the temporary Detection Engine
+stops. The hook runs even when ingestion or scorecard checks fail. An
+exception that interrupts the batch skips the hook and propagates as a failure.
+
+The runner prints a unique evidence directory and retains `attack.log`,
+`gaps.json`, and `gaps.json.review.sqlite3` there after deleting its scratch
+database and scenario files. The history captures actual producer records,
+including events that fail to reach the API. Each invocation gets a new
+directory, so previous evidence is never reused. By default the directory
+is in the system temporary directory; choose a durable parent when needed:
+
+```bash
+range/.venv/bin/python tests/run_m2_baseline.py --output-dir /tmp/bantis-m2-reports
+```
+
+The fixed gap deadline is the UTC completion time of this batch's correlation
+pass. There is no scheduler wait or polling loop. A gap or late detection,
+an incomplete gap check, or a scenario `error` makes the baseline exit `1`,
+in addition to its existing failure conditions. Successful checks exit `0`.
+Read the printed diagnostics and check the current report's existence and
+`complete` field; an incomplete check may leave only the producer history.
+Rule suggestions remain inactive in the human review queue.
+
+The hook regression suite uses controlled scenario results with the real
+logging, HTTP API, correlation, and detector, without attacks or Git commits:
+
+```bash
+range/.venv/bin/python -m pytest tests/test_m2_post_run.py -q
+```
+
 ## Baseline: 2026-09-29
 
 Run three times consecutively; identical result every time (deterministic).
