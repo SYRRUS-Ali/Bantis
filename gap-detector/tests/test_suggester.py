@@ -81,6 +81,40 @@ def test_only_outstanding_gaps_generate_new_rules(tmp_path, state):
     assert suggest_rules(report)["drafts"] == []
 
 
+@pytest.mark.parametrize("age", [200, 1])
+@pytest.mark.parametrize("detected_status", ["success", "failure"])
+def test_partial_scenario_coverage_keeps_run_gaps_without_redundant_drafts(tmp_path, age, detected_status):
+    report_for(tmp_path, event(event_id="missed"),
+               event(event_id="covered", status=detected_status),
+               event("leaked-secret", event_id="uncovered-scenario"))
+    incident = {"incident_id": "existing", "created_at": (NOW - timedelta(seconds=age)).isoformat(),
+                "correlated_event_ids": ["covered"]}
+    report = compare(read_history(tmp_path / "history.log"), [incident], now=NOW)
+    original = copy.deepcopy(report)
+    drafts = suggest_rules(report)["drafts"]
+    assert [draft["scenario"] for draft in drafts] == ["leaked-secret"]
+    assert report["counts"]["gap"] == 2
+    assert next(run for run in report["runs"] if run["event_id"] == "missed")["state"] == "gap"
+    assert report == original
+    report["runs"].reverse()
+    assert suggest_rules(report)["drafts"] == drafts
+
+
+@pytest.mark.parametrize("change", [
+    {"incident_ids": []}, {"incident_ids": [""]}, {"first_detected_at": None},
+    {"first_detected_at": (NOW + timedelta(seconds=1)).isoformat()},
+    {"first_detected_at": NOW.isoformat()},
+])
+def test_unproven_detection_cannot_suppress_a_rule(tmp_path, change):
+    report_for(tmp_path, event(event_id="missed"), event(event_id="covered"))
+    incident = {"incident_id": "existing", "created_at": (NOW - timedelta(seconds=200)).isoformat(),
+                "correlated_event_ids": ["covered"]}
+    report = compare(read_history(tmp_path / "history.log"), [incident], now=NOW)
+    next(run for run in report["runs"] if run["event_id"] == "covered").update(change)
+    with pytest.raises(ValueError):
+        suggest_rules(report)
+
+
 @pytest.mark.parametrize("change", [
     {"complete": False}, {"schema_version": 2}, {"schema_version": True},
     {"runs": None}, {"observed_at": "invalid"}, {"counts": {}},

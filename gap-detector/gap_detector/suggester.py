@@ -27,6 +27,7 @@ def _gap_groups(report: dict) -> dict[str, list[dict]]:
         raise ValueError("a complete version 1 gap report is required")
     observed = utc(report.get("observed_at"))
     groups: dict[str, list[dict]] = {}
+    covered = set()
     seen = set()
     counts: Counter = Counter()
     for run in report["runs"]:
@@ -46,6 +47,15 @@ def _gap_groups(report: dict) -> dict[str, list[dict]]:
             raise ValueError("invalid run observation times")
         if (run["status"] == "error") != (state == "invalid"):
             raise ValueError("scenario errors must be invalid exercises")
+        if state in {"detected", "late_detection"}:
+            incident_ids = run.get("incident_ids")
+            first_detected = utc(run.get("first_detected_at"))
+            if (not isinstance(incident_ids, list) or not incident_ids
+                    or not all(nonempty(value) for value in incident_ids)
+                    or first_detected > observed
+                    or (first_detected <= deadline) != (state == "detected")):
+                raise ValueError("detection evidence is incomplete or contradicts its state")
+            covered.add(scenario)
         if state == "gap":
             if (deadline > observed or run.get("incident_ids") != []
                     or run.get("first_detected_at") is not None
@@ -57,7 +67,8 @@ def _gap_groups(report: dict) -> dict[str, list[dict]]:
     if (not isinstance(actual, dict) or actual != expected
             or any(type(value) is not int for value in actual.values())):
         raise ValueError("report counts do not match run states")
-    return groups
+    # Partial coverage needs investigation, rather than a duplicate scenario rule.
+    return {scenario: runs for scenario, runs in groups.items() if scenario not in covered}
 
 
 def matches_draft(draft: dict, event: dict) -> bool:
@@ -146,7 +157,7 @@ def _draft(scenario: str, runs: list[dict]) -> dict:
 
 
 def suggest_rules(report: dict) -> dict:
-    """One deterministic, inactive draft per scenario with an outstanding gap."""
+    """Draft only for missed scenarios with no observed detection in this report."""
     groups = _gap_groups(report)
     return {"schema_version": 1, "generator": "scenario-to-rule-v1",
             "gap_report_observed_at": report["observed_at"],

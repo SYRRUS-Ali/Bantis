@@ -133,6 +133,13 @@ Only outstanding `gap` entries produce drafts. `pending`, `invalid`, and
 `detected` runs produce none. `late_detection` remains a timing finding, rather
 than prompting a redundant coverage rule. Multiple gaps for the same scenario
 produce one draft containing sorted gap IDs, event IDs, and observed outcomes.
+If another valid run of the same scenario is `detected` or `late_detection` in
+the same report, no new rule is suggested for that scenario. This partial
+coverage needs pipeline or rule-condition investigation. Missed runs remain
+`gap` entries with their exact event IDs, counts, and failing exit code; a
+detected run never establishes full coverage of the scenario. Coverage of a
+different scenario does not suppress suggestions. Suppression uses only the
+current report; it does not remove proposals already retained in the queue.
 The draft ID is stable across replays; the report continues to represent the
 current exercise rather than accumulated review history.
 
@@ -252,6 +259,34 @@ output. Queue insertion and report replacement are separate commits: a failed
 report write may leave a pending proposal in the queue. A retry is safe and
 idempotent; it does not activate anything. Existing pre-queue reports can be
 imported by rerunning the offline suggester against their complete gap report.
+
+### Pending proposals endpoint
+
+Serve the same queue over a local HTTP endpoint, using only the standard library.
+From the repository root:
+
+```bash
+cd gap-detector
+python -m gap_detector.api --queue /tmp/bantis-purple/gaps.json.review.sqlite3 --port 8200
+```
+
+In another terminal:
+
+```bash
+curl --fail http://127.0.0.1:8200/rules/suggestions/pending
+```
+
+The response is `{"items": [...]}`, containing full queue records in creation
+order, filtered by the authoritative outer `pending_review` status. An empty
+queue returns `{"items": []}`. Approved and rejected records are excluded,
+even though their nested draft snapshots retain their original status.
+Each request reads current persisted decisions and returns `Cache-Control:
+no-store`. A missing queue is initialized empty, as with the review CLI; use
+the exact `--review-queue` path passed to the generator when overriding defaults.
+Queue failures return HTTP 503 with a generic JSON error. Unknown routes return
+404 and methods other than GET return 405. The server binds only to
+`127.0.0.1`, has no authentication, and is intended for local inspection.
+Use the existing CLI for review decisions; this endpoint never activates rules.
 
 ## Validation
 
